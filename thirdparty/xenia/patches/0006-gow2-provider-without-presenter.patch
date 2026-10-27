@@ -1,0 +1,150 @@
+diff --git a/src/xenia/ui/d3d12/d3d12_provider.cc b/src/xenia/ui/d3d12/d3d12_provider.cc
+index 52954dd..461267c 100644
+--- a/src/xenia/ui/d3d12/d3d12_provider.cc
++++ b/src/xenia/ui/d3d12/d3d12_provider.cc
+@@ -14,8 +14,7 @@
+ #include "xenia/base/cvar.h"
+ #include "xenia/base/logging.h"
+ #include "xenia/base/math.h"
+-#include "xenia/ui/d3d12/d3d12_immediate_drawer.h"
+-#include "xenia/ui/d3d12/d3d12_presenter.h"
++// gow2: no d3d12_immediate_drawer.h or d3d12_presenter.h (see .h).
+ #include "xenia/ui/d3d12/d3d12_util.h"
+ DEFINE_bool(d3d12_debug, false, "Enable Direct3D 12 and DXGI debug layer.",
+             "D3D12");
+@@ -117,24 +116,9 @@ D3D12Provider::~D3D12Provider() {
+   }
+ }
+ 
+-bool D3D12Provider::EnableIncreaseBasePriorityPrivilege() {
+-  TOKEN_PRIVILEGES privileges;
+-  privileges.PrivilegeCount = 1;
+-  privileges.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+-  if (!LookupPrivilegeValue(nullptr, SE_INC_BASE_PRIORITY_NAME,
+-                            &privileges.Privileges[0].Luid)) {
+-    return false;
+-  }
+-  HANDLE token;
+-  if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES, &token)) {
+-    return false;
+-  }
+-  bool enabled = AdjustTokenPrivileges(token, false, &privileges,
+-                                       sizeof(privileges), nullptr, nullptr) &&
+-                 GetLastError() != ERROR_NOT_ALL_ASSIGNED;
+-  CloseHandle(token);
+-  return enabled;
+-}
++// gow2: no EnableIncreaseBasePriorityPrivilege: the global realtime queue
++// priority asks for SeIncreaseBasePriorityPrivilege on the process token;
++// d3d12_queue_priority=2 counts as 1 (high).
+ 
+ bool D3D12Provider::Initialize() {
+   // Load the core libraries.
+@@ -184,42 +168,11 @@ bool D3D12Provider::Initialize() {
+         "will be unavailable");
+   }
+ 
+-  // Load optional dxilconv.dll.
++  // gow2: dxilconv.dll and dxcompiler.dll are not loaded: they only serve
++  // debug DXIL disassembly (d3d12_dxbc_disasm_dxilconv), and
++  // DxbcConverterCreateInstance/DxcCreateInstance return E_NOINTERFACE.
+   pfn_dxilconv_dxc_create_instance_ = nullptr;
+-  library_dxilconv_ = LoadLibraryW(L"dxilconv.dll");
+-  if (library_dxilconv_) {
+-    pfn_dxilconv_dxc_create_instance_ = DxcCreateInstanceProc(
+-        GetProcAddress(library_dxilconv_, "DxcCreateInstance"));
+-    if (pfn_dxilconv_dxc_create_instance_ == nullptr) {
+-      XELOGD(
+-          "Failed to get DxcCreateInstance from dxilconv.dll, converted DXIL "
+-          "disassembly for debugging will be unavailable");
+-    }
+-  } else {
+-    XELOGD(
+-        "Failed to load dxilconv.dll, converted DXIL disassembly for debugging "
+-        "will be unavailable - DXIL may be unsupported by your OS version");
+-  }
+-
+-  // Load optional dxcompiler.dll.
+   pfn_dxcompiler_dxc_create_instance_ = nullptr;
+-  library_dxcompiler_ = LoadLibraryW(L"dxcompiler.dll");
+-  if (library_dxcompiler_) {
+-    pfn_dxcompiler_dxc_create_instance_ = DxcCreateInstanceProc(
+-        GetProcAddress(library_dxcompiler_, "DxcCreateInstance"));
+-    if (pfn_dxcompiler_dxc_create_instance_ == nullptr) {
+-      XELOGD(
+-          "Failed to get DxcCreateInstance from dxcompiler.dll, converted DXIL "
+-          "disassembly for debugging will be unavailable");
+-    }
+-  } else {
+-    XELOGD(
+-        "Failed to load dxcompiler.dll, converted DXIL disassembly for "
+-        "debugging will be unavailable - if needed, download the DirectX "
+-        "Shader Compiler from "
+-        "https://github.com/microsoft/DirectXShaderCompiler/releases and place "
+-        "the DLL in the Xenia directory");
+-  }
+ 
+   // Configure the DXGI debug info queue.
+   if (cvars::d3d12_break_on_error || cvars::d3d12_break_on_warning) {
+@@ -379,16 +332,8 @@ bool D3D12Provider::Initialize() {
+   // Create the command queue for graphics.
+   D3D12_COMMAND_QUEUE_DESC queue_desc;
+   queue_desc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+-  if (cvars::d3d12_queue_priority >= 2) {
+-    queue_desc.Priority = D3D12_COMMAND_QUEUE_PRIORITY_GLOBAL_REALTIME;
+-    if (!EnableIncreaseBasePriorityPrivilege()) {
+-      XELOGW(
+-          "Failed to enable SeIncreaseBasePriorityPrivilege for global "
+-          "realtime Direct3D 12 command queue priority, falling back to high "
+-          "priority, try launching Xenia as administrator");
+-      queue_desc.Priority = D3D12_COMMAND_QUEUE_PRIORITY_HIGH;
+-    }
+-  } else if (cvars::d3d12_queue_priority >= 1) {
++  // gow2: no global realtime priority (see above), 2 counts as 1.
++  if (cvars::d3d12_queue_priority >= 1) {
+     queue_desc.Priority = D3D12_COMMAND_QUEUE_PRIORITY_HIGH;
+   } else {
+     queue_desc.Priority = D3D12_COMMAND_QUEUE_PRIORITY_NORMAL;
+@@ -519,14 +464,7 @@ uint32_t D3D12Provider::CreateUploadResource(
+ 
+   return UPLOAD_RESULT_CREATE_SUCCESS;
+ }
+-std::unique_ptr<Presenter> D3D12Provider::CreatePresenter(
+-    Presenter::HostGpuLossCallback host_gpu_loss_callback) {
+-  return D3D12Presenter::Create(host_gpu_loss_callback, *this);
+-}
+-
+-std::unique_ptr<ImmediateDrawer> D3D12Provider::CreateImmediateDrawer() {
+-  return D3D12ImmediateDrawer::Create(*this);
+-}
++// gow2: no CreatePresenter or CreateImmediateDrawer (see .h).
+ 
+ void D3D12Provider::LogD3D12DebugMessages() const {
+   if (!device_) {
+diff --git a/src/xenia/ui/d3d12/d3d12_provider.h b/src/xenia/ui/d3d12/d3d12_provider.h
+index 6542341..6f371b7 100644
+--- a/src/xenia/ui/d3d12/d3d12_provider.h
++++ b/src/xenia/ui/d3d12/d3d12_provider.h
+@@ -33,11 +33,8 @@ class D3D12Provider : public GraphicsProvider {
+ 
+   static std::unique_ptr<D3D12Provider> Create();
+ 
+-  std::unique_ptr<Presenter> CreatePresenter(
+-      Presenter::HostGpuLossCallback host_gpu_loss_callback =
+-          Presenter::FatalErrorHostGpuLossCallback) override;
+-
+-  std::unique_ptr<ImmediateDrawer> CreateImmediateDrawer() override;
++  // gow2: no CreatePresenter or CreateImmediateDrawer (Xenia's presenter and
++  // immediate drawer are not vendored; presentation lives in runtime/gpu).
+   uint32_t CreateUploadResource(
+       D3D12_HEAP_FLAGS HeapFlags, _In_ const D3D12_RESOURCE_DESC* pDesc,
+       D3D12_RESOURCE_STATES InitialResourceState, REFIID riidResource,
+@@ -168,7 +165,7 @@ class D3D12Provider : public GraphicsProvider {
+  private:
+   D3D12Provider() = default;
+ 
+-  static bool EnableIncreaseBasePriorityPrivilege();
++  // gow2: no EnableIncreaseBasePriorityPrivilege (realtime priority).
+   bool Initialize();
+ 
+   typedef HRESULT(WINAPI* PFNCreateDXGIFactory2)(UINT Flags, REFIID riid,

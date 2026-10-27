@@ -1,0 +1,28 @@
+diff --git a/src/xenia/apu/xma_context_new.cc b/src/xenia/apu/xma_context_new.cc
+--- a/src/xenia/apu/xma_context_new.cc
++++ b/src/xenia/apu/xma_context_new.cc
+@@ -125,6 +125,12 @@
+   const XMA_CONTEXT_DATA initial_data = data;
+ 
+   if (!data.output_buffer_valid) {
++    return true;
++  }
++  // gow2: output_buffer_block_count = 0 gives a zero-capacity ring buffer
++  // (RingBuffer::set_read_offset does % 0): counted error, no decoding.
++  if (!data.output_buffer_block_count) {
++    gow2::hooks::OnXmaDecodeError(id());
+     return true;
+   }
+ 
+diff --git a/src/xenia/apu/xma_context_old.cc b/src/xenia/apu/xma_context_old.cc
+--- a/src/xenia/apu/xma_context_old.cc
++++ b/src/xenia/apu/xma_context_old.cc
+@@ -339,6 +339,8 @@
+   if (!data->output_buffer_block_count) {
+     XELOGE("XmaContext {}: Error - Received 0 for output_buffer_block_count!",
+            id());
++    // gow2: error counted in the summary (xma_decode_errors), as with the new decoder.
++    gow2::hooks::OnXmaDecodeError(id());
+     return;
+   }
+ 

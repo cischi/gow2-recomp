@@ -1,0 +1,73 @@
+diff --git a/src/xenia/gpu/d3d12/d3d12_command_processor.cc b/src/xenia/gpu/d3d12/d3d12_command_processor.cc
+index f535e14..bc4a31b 100644
+--- a/src/xenia/gpu/d3d12/d3d12_command_processor.cc
++++ b/src/xenia/gpu/d3d12/d3d12_command_processor.cc
+@@ -2908,6 +2908,10 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
+       host_render_targets_used, pixel_shader && pixel_shader->writes_depth(),
+       !host_render_targets_used || xenos_sample_positions_used_);
+   gviargs.SetupRegisterValues(regs, window_offset_tiles != 0);
++  // gow2: 2x sample 0 as on the console on the rtv path without Xenos
++  // positions (patch 0009).
++  gviargs.msaa_2x_sample_0_to_console =
++      host_render_targets_used && !xenos_sample_positions_used_;
+ 
+   if (gviargs == previous_viewport_info_args_) {
+     viewport_info = previous_viewport_info_;
+diff --git a/src/xenia/gpu/draw_util.cc b/src/xenia/gpu/draw_util.cc
+index fa99a4f..1b0808e 100644
+--- a/src/xenia/gpu/draw_util.cc
++++ b/src/xenia/gpu/draw_util.cc
+@@ -468,6 +468,26 @@ void GetHostViewportInfo(GetViewportInfoArgs* XE_RESTRICT args,
+     offset_add_xy[0] += 0.5f;
+     offset_add_xy[1] += 0.5f;
+   }
++  // gow2: the console has 2x sample 0 at (-4, +4)/16 and sample 1 at (+4, -4)/16
++  // (the 360 runtime shifts the viewport of 2x draws by (-0.25, +0.25) guest px
++  // to bring sample 0 to the pixel center); here guest sample 0 is the host's
++  // top-left one, fixed at (-0.25, -0.25) host px at every internal
++  // resolution, so the difference depends on the scale: in guest px it is
++  // (0.25 - 0.25 / sx, -0.25 - 0.25 / sy), i.e. (0, -0.5) at 1x and
++  // (+0.125, -0.375) at 2x, and sample 0 sees what the console sees. The
++  // fallback to 4x MSAA (host without native 2x) is not covered by the formula.
++  // Canary's Xenos positions (xenos_sample_positions) on the rtv path give
++  // a wrong depth after a transfer from 1x
++  // (d3d12_msaa: 2x depth from sample 0 after a transfer from 1x).
++  // Patch 0009.
++  // shortcut: sample 1 is not where it is on the console and the resolved color
++  // is shifted like the geometry (half a pixel in y at 1x), upgrade: canary's
++  // Xenos positions once they give the right depth after transfers too
++  if (args->msaa_2x_sample_0_to_console &&
++      args->msaa_samples == xenos::MsaaSamples::k2X) {
++    offset_add_xy[0] += 0.25f - 0.25f / float(args->draw_resolution_scale_x);
++    offset_add_xy[1] -= 0.25f + 0.25f / float(args->draw_resolution_scale_y);
++  }
+   // Only scale the whole pixel part of the viewport offset. Keep the Xenos
+   // sample offset in host pixels since programmed sample positions don't scale
+   // (see kXenosSamplePositions2x).
+diff --git a/src/xenia/gpu/draw_util.h b/src/xenia/gpu/draw_util.h
+index 47342df..c505ce1 100644
+--- a/src/xenia/gpu/draw_util.h
++++ b/src/xenia/gpu/draw_util.h
+@@ -365,6 +365,9 @@ struct GetViewportInfoArgs {
+           uint32_t draw_resolution_scale_y : 3;
+           xenos::MsaaSamples msaa_samples : xenos::kMsaaSamplesBits;
+           uint32_t xenos_sample_positions : 1;
++          // gow2: 2x draws shifted toward the console's sample 0, according to
++          // the scale (patch 0009; Setup clears it, IssueDraw sets it).
++          uint32_t msaa_2x_sample_0_to_console : 1;
+         };
+         uint32_t packed_portions;
+       };
+@@ -555,6 +558,12 @@ uint32_t GetNormalizedColorMask(const RegisterFile& regs,
+ // multisampled render targets are stored in the memory (like 1x2 single-sampled
+ // pixels with 2x MSAA, or like 2x2 single-sampled pixels with 4x), assuming
+ // that the sample 0 is the top sample, and the sample 1 is the bottom one.
++// gow2: the console's 2x pattern is known: guest 0 at (-4, +4)/16, guest 1 at
++// (+4, -4)/16 (the 360 runtime shifts the viewport of 2x draws by
++// (-0.25, +0.25) px). On the rtv path without Xenos positions
++// GetHostViewportInfo shifts 2x draws (-0.5 px in y at 1x, scaled with the
++// internal resolution) so that guest sample 0 sees the console's geometry
++// (patch 0009).
+ inline uint32_t GetD3D10SampleIndexForGuest2xMSAA(
+     uint32_t guest_sample_index, bool native_2x_msaa_supported) {
+   assert(guest_sample_index <= 1);

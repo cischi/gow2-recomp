@@ -1,0 +1,50 @@
+diff --git a/src/xenia/gpu/command_processor.cc b/src/xenia/gpu/command_processor.cc
+index 87ebfb5..0bff8a6 100644
+--- a/src/xenia/gpu/command_processor.cc
++++ b/src/xenia/gpu/command_processor.cc
+@@ -24,6 +24,9 @@
+ #include "xenia/gpu/texture_info.h"
+ #include "xenia/gpu/xenos_zpd_report.h"
+ #include "xenia/kernel/kernel_state.h"
++// gow2: summary counters (runtime/gpu/shims/gow2_hooks.h), used by the
++// PM4 code of pm4_command_processor_implement.h included further down.
++#include "gow2_hooks.h"
+ #include "xenia/kernel/user_module.h"
+ #if !defined(NDEBUG)
+ 
+diff --git a/src/xenia/gpu/d3d12/d3d12_command_processor.cc b/src/xenia/gpu/d3d12/d3d12_command_processor.cc
+index 881390d..f535e14 100644
+--- a/src/xenia/gpu/d3d12/d3d12_command_processor.cc
++++ b/src/xenia/gpu/d3d12/d3d12_command_processor.cc
+@@ -26,6 +26,9 @@
+ #include "xenia/gpu/xenos.h"
+ #include "xenia/gpu/xenos_zpd_report.h"
+ #include "xenia/kernel/kernel_state.h"
++// gow2: summary counters (runtime/gpu/shims/gow2_hooks.h), used by the
++// PM4 code of pm4_command_processor_implement.h included further down.
++#include "gow2_hooks.h"
+ #include "xenia/ui/d3d12/d3d12_presenter.h"
+ #include "xenia/ui/d3d12/d3d12_util.h"
+ 
+diff --git a/src/xenia/gpu/pm4_command_processor_implement.h b/src/xenia/gpu/pm4_command_processor_implement.h
+index 55df687..904a449 100644
+--- a/src/xenia/gpu/pm4_command_processor_implement.h
++++ b/src/xenia/gpu/pm4_command_processor_implement.h
+@@ -625,6 +625,8 @@ XE_COLD
+ bool COMMAND_PROCESSOR::HitUnimplementedOpcode(uint32_t opcode,
+                                                uint32_t count) XE_RESTRICT {
+   XELOGGPU("Unimplemented GPU OPCODE: 0x{:02X}\t\tCOUNT: {}\n", opcode, count);
++  // gow2: unexecuted packet counted in the summary (gpu_unknown_packet).
++  gow2::hooks::OnUnknownPacket(opcode);
+   assert_always();
+   reader_.AdvanceRead(count * sizeof(uint32_t));
+   trace_writer_.WritePacketEnd();
+@@ -1148,6 +1150,8 @@ bool COMMAND_PROCESSOR::ExecutePacketType3Draw(
+   if (!draw_succeeded) {
+     COMMAND_PROCESSOR::OnVIZSurveyDraw(false);
+   }
++  // gow2: draw counted in the summary (gpu_draws; gpu_draws_skipped if failed).
++  gow2::hooks::OnDraw(draw_succeeded);
+ 
+   // If read the packed correctly, but merely couldn't execute it (because of,
+   // for instance, features not supported by the host), don't terminate command

@@ -1,0 +1,28 @@
+diff --git a/XenonRecomp/recompiler.cpp b/XenonRecomp/recompiler.cpp
+index ba6c208..c24efdd 100644
+--- a/XenonRecomp/recompiler.cpp
++++ b/XenonRecomp/recompiler.cpp
+@@ -1296,7 +1296,7 @@ bool Recompiler::Recompile(
+         break;
+ 
+     case PPC_INST_MFTB:
+-        println("\t{}.u64 = __rdtsc();", r(insn.operands[0]));
++        println("\t{}.u64 = PPC_QUERY_TIMEBASE();", r(insn.operands[0]));
+         break;
+ 
+     case PPC_INST_MR:
+diff --git a/XenonUtils/ppc_context.h b/XenonUtils/ppc_context.h
+index 2a90de5..ad338e4 100644
+--- a/XenonUtils/ppc_context.h
++++ b/XenonUtils/ppc_context.h
+@@ -948,4 +948,10 @@ inline uint64_t __rdtsc()
+ #   error "Missing implementation for __rdtsc()"
+ #endif
+ 
++// Timebase read by mftb. The default is the host TSC; whoever includes this
++// file can redefine it beforehand (on the console the timebase runs at 50 MHz).
++#ifndef PPC_QUERY_TIMEBASE
++#define PPC_QUERY_TIMEBASE() __rdtsc()
++#endif
++
+ #endif

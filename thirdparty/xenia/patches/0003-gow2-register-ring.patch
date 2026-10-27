@@ -1,0 +1,92 @@
+diff --git a/src/xenia/gpu/command_processor.cc b/src/xenia/gpu/command_processor.cc
+index 16b00f6..87ebfb5 100644
+--- a/src/xenia/gpu/command_processor.cc
++++ b/src/xenia/gpu/command_processor.cc
+@@ -372,7 +372,9 @@ void CommandProcessor::WorkerThreadMain() {
+       fn();
+     }
+ 
+-    uint32_t write_ptr_index = write_ptr_index_.load();
++    // gow2: no MMIO, the CPU writes CP_RB_WPTR into the guest register
++    // region: read it back from there (0xBAADF00D until the ring exists).
++    uint32_t write_ptr_index = graphics_system_->gow2_PollWritePointer();
+     if (write_ptr_index == 0xBAADF00D || read_ptr_index_ == write_ptr_index) {
+       SCOPE_profile_cpu_i("gpu", "xe::gpu::CommandProcessor::Stall");
+       // We've run out of commands to execute.
+@@ -395,7 +397,8 @@ void CommandProcessor::WorkerThreadMain() {
+           xe::threading::MaybeYield();
+         }
+         loop_count++;
+-        write_ptr_index = write_ptr_index_.load();
++        // gow2: write pointer from the guest region while waiting too.
++        write_ptr_index = graphics_system_->gow2_PollWritePointer();
+       } while (worker_running_ && pending_fns_.empty() &&
+                (write_ptr_index == 0xBAADF00D ||
+                 read_ptr_index_ == write_ptr_index));
+@@ -409,6 +412,11 @@ void CommandProcessor::WorkerThreadMain() {
+     // Execute. Note that we handle wraparound transparently.
+     read_ptr_index_ = ExecutePrimaryBuffer(read_ptr_index_, write_ptr_index);
+ 
++    // gow2: read pointer also into CP_RB_RPTR in the guest region, before the
++    // write-back (whoever sees the write-back sees the register too).
++    graphics_system_->gow2_MirrorRegister(XE_GPU_REG_CP_RB_RPTR,
++                                          read_ptr_index_);
++
+     // TODO(benvanik): use reader->Read_update_freq_ and only issue after moving
+     //     that many indices.
+     // Keep in mind that the gpu also updates the cpu-side copy if the write
+@@ -763,6 +771,9 @@ void CommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
+     } else {
+       HandleSpecialRegisterWrite(index, value);
+     }
++    // gow2: the final value (e.g. COHER_STATUS_HOST with bit 31) also into the
++    // guest register region, where the CPU reads it.
++    graphics_system_->gow2_MirrorRegister(index, register_file_->values[index]);
+   } else {
+     XELOGW("CommandProcessor::WriteRegister index out of bounds: {}", index);
+     return;
+diff --git a/src/xenia/gpu/d3d12/d3d12_command_processor.cc b/src/xenia/gpu/d3d12/d3d12_command_processor.cc
+index 7149982..67f9a9c 100644
+--- a/src/xenia/gpu/d3d12/d3d12_command_processor.cc
++++ b/src/xenia/gpu/d3d12/d3d12_command_processor.cc
+@@ -1873,8 +1873,12 @@ void D3D12CommandProcessor::WriteRegisterForceinline(uint32_t index,
+     }
+   } else {
+     _ReadWriteBarrier();
+-    return;
+   }
++  // gow2: the final value also into the guest register region, where the
++  // CPU reads it (like CommandProcessor::WriteRegister). Applies to every
++  // single write, constants and fetch included (VdSwap reads the front
++  // buffer's fetch constant); bulk copies do not go through here.
++  graphics_system_->gow2_MirrorRegister(index, register_file_->values[index]);
+ }
+ // todo: bit-pack the bools and use bitarith to reduce branches
+ void D3D12CommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
+@@ -2130,6 +2134,8 @@ void D3D12CommandProcessor::WritePossiblySpecialRegistersFromMem(
+     } else {
+       HandleSpecialRegisterWrite(index, value);
+     }
++    // gow2: also into the guest register region (see WriteRegister).
++    graphics_system_->gow2_MirrorRegister(index, register_file_->values[index]);
+   }
+ }
+ template <uint32_t register_lower_bound, uint32_t register_upper_bound>
+@@ -2143,8 +2149,15 @@ D3D12CommandProcessor::WriteRegisterRangeFromMem_WithKnownBound(
+   auto get_end_before_qty = [&end, current_index](uint32_t regnum) {
+     return std::min<uint32_t>(regnum, end) - current_index;
+   };
+-#define REGULAR_WRITE_CALLBACK(s, e, i, b, n) \
+-  copy_and_swap_32_unaligned(&register_file_->values[i], b, n)
++// gow2: ordinary registers also into the guest register region (see
++// WriteRegister); shader constants, fetch, bool and loop are not: the CPU
++// does not read them back.
++#define REGULAR_WRITE_CALLBACK(s, e, i, b, n)                       \
++  copy_and_swap_32_unaligned(&register_file_->values[i], b, n);    \
++  for (uint32_t gow2_i = 0; gow2_i < (n); ++gow2_i) {              \
++    graphics_system_->gow2_MirrorRegister(                         \
++        (i) + gow2_i, register_file_->values[(i) + gow2_i]);       \
++  }
+ #define WRITE_FETCH_CONSTANTS_CALLBACK(str, er, ind, b, n) \
+   WriteFetchFromMem(ind, b, n)
+ #define SPECIAL_REG_RANGE_CALLBACK(str, edr, ind, bs, n) \

@@ -1,0 +1,41 @@
+diff --git a/src/xenia/gpu/d3d12/d3d12_command_processor.h b/src/xenia/gpu/d3d12/d3d12_command_processor.h
+index 7c6324c..e42fdbb 100644
+--- a/src/xenia/gpu/d3d12/d3d12_command_processor.h
++++ b/src/xenia/gpu/d3d12/d3d12_command_processor.h
+@@ -57,7 +57,9 @@ struct MemExportRange {
+   uint32_t base_address_dwords;
+   uint32_t size_dwords;
+ };
+-class D3D12CommandProcessor final : public CommandProcessor {
++// gow2: not final: runtime/gpu/d3d12_backend.cpp derives from it the command
++// processor that presents on each swap, counts resolves (IssueSwap/IssueCopy).
++class D3D12CommandProcessor : public CommandProcessor {
+  protected:
+ #define OVERRIDING_BASE_CMDPROCESSOR
+ #include "../pm4_command_processor_declare.h"
+diff --git a/src/xenia/gpu/pm4_command_processor_implement.h b/src/xenia/gpu/pm4_command_processor_implement.h
+index 7581813..d23e496 100644
+--- a/src/xenia/gpu/pm4_command_processor_implement.h
++++ b/src/xenia/gpu/pm4_command_processor_implement.h
+@@ -684,8 +684,8 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_XE_SWAP(uint32_t packet,
+   uint32_t frontbuffer_height = reader_.ReadAndSwap<uint32_t>();
+   reader_.AdvanceRead((count - 4) * sizeof(uint32_t));
+ 
+-  COMMAND_PROCESSOR::IssueSwap(frontbuffer_ptr, frontbuffer_width,
+-                               frontbuffer_height);
++  // gow2: virtual call, for the IssueSwap of gow2's subclass.
++  IssueSwap(frontbuffer_ptr, frontbuffer_width, frontbuffer_height);
+ 
+   ++counter_;
+   return true;
+@@ -1132,7 +1132,9 @@ bool COMMAND_PROCESSOR::ExecutePacketType3Draw(
+     // backend's predicate instead of blocking. Surveys themselves are
+     // ordinary draws here.
+     if (COMMAND_PROCESSOR::PrepareVIZDraw(viz_query_condition)) {
+-      draw_succeeded = COMMAND_PROCESSOR::IssueDraw(
++      // gow2: virtual call, for the subclasses' IssueDraw (the
++      // test command processor in tests/gpu/null_command_processor.h).
++      draw_succeeded = IssueDraw(
+           vgt_draw_initiator.prim_type, vgt_draw_initiator.num_indices,
+           is_indexed ? &index_buffer_info : nullptr,
+           xenos::IsMajorModeExplicit(vgt_draw_initiator.major_mode,

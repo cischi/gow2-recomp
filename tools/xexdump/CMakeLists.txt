@@ -1,0 +1,4 @@
+add_executable(xexdump main.cpp)
+target_link_libraries(xexdump PRIVATE XenonUtils)
+target_compile_definitions(xexdump PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_link_libraries(xexdump PRIVATE gow2_xex_check)

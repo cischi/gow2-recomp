@@ -1,0 +1,132 @@
+diff --git a/src/xenia/gpu/d3d12/d3d12_command_processor.cc b/src/xenia/gpu/d3d12/d3d12_command_processor.cc
+index ef53494..ff0c5c7 100644
+--- a/src/xenia/gpu/d3d12/d3d12_command_processor.cc
++++ b/src/xenia/gpu/d3d12/d3d12_command_processor.cc
+@@ -2943,11 +2943,14 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
+   // holds the shifted geometry) nor on shadow maps and surfaces of
+   // another size; the serial number in padding_set_to_0 invalidates the
+   // cached viewport when the jitter changes (patch 0013).
+-  if ((gow2_jitter_xy_[0] != 0.0f || gow2_jitter_xy_[1] != 0.0f) &&
++  // gow2: the same predicate selects the LOD bias draws (patch 0014).
++  gow2_scene_draw_ =
+       normalized_depth_control.z_enable &&
+       regs.Get<reg::RB_SURFACE_INFO>().surface_pitch == gow2_jitter_pitch_ &&
+       !(pixel_shader && pixel_shader->writes_depth() &&
+-        normalized_depth_control.zfunc == xenos::CompareFunction::kAlways)) {
++        normalized_depth_control.zfunc == xenos::CompareFunction::kAlways);
++  if ((gow2_jitter_xy_[0] != 0.0f || gow2_jitter_xy_[1] != 0.0f) &&
++      gow2_scene_draw_) {
+     gviargs.gow2_jitter_xy[0] = gow2_jitter_xy_[0];
+     gviargs.gow2_jitter_xy[1] = gow2_jitter_xy_[1];
+     gviargs.padding_set_to_0 = gow2_jitter_serial_;
+@@ -4499,6 +4502,11 @@ XE_NOINLINE void D3D12CommandProcessor::UpdateSystemConstantValues_Impl(
+     system_constants_.param_gen_window_offset[i] = param_gen_window_offset[i];
+   }
+ 
++  // gow2: upscaler LOD bias only on scene draws (patch 0014).
++  const float gow2_mip_bias = gow2_scene_draw_ ? gow2_mip_bias_ : 0.0f;
++  update_dirty_floatmask(system_constants_.gow2_mip_bias, gow2_mip_bias);
++  system_constants_.gow2_mip_bias = gow2_mip_bias;
++
+   // Point size.
+   if (vgt_draw_initiator.prim_type == xenos::PrimitiveType::kPointList) {
+     auto pa_su_point_minmax = regs.Get<reg::PA_SU_POINT_MINMAX>();
+diff --git a/src/xenia/gpu/d3d12/d3d12_command_processor.h b/src/xenia/gpu/d3d12/d3d12_command_processor.h
+index d02b50b..a7cde15 100644
+--- a/src/xenia/gpu/d3d12/d3d12_command_processor.h
++++ b/src/xenia/gpu/d3d12/d3d12_command_processor.h
+@@ -120,6 +120,9 @@ class D3D12CommandProcessor : public CommandProcessor {
+     gow2_jitter_xy_[1] = y;
+     if (++gow2_jitter_serial_ == 0) gow2_jitter_serial_ = 1;
+   }
++  // gow2: LOD bias (<= 0) of fetches with computed LOD in the same draws as
++  // the jitter; 0 = no effect (patch 0014).
++  void SetGow2MipBias(float bias) { gow2_mip_bias_ = bias; }
+   // gow2: copies for the upscaler after a draw (patch 0013, see
+   // D3D12RenderTargetCache::Gow2CopyColorTarget0 and
+   // D3D12TextureCache::Gow2CopyActiveTexture).
+@@ -651,6 +654,10 @@ class D3D12CommandProcessor : public CommandProcessor {
+   float gow2_jitter_xy_[2] = {};
+   uint32_t gow2_jitter_serial_ = 0;
+   uint32_t gow2_jitter_pitch_ = 0;
++  // gow2: upscaler LOD bias and the scene-draw predicate of the last
++  // IssueDraw (patch 0014).
++  float gow2_mip_bias_ = 0.0f;
++  bool gow2_scene_draw_ = false;
+ 
+   std::unique_ptr<D3D12SharedMemory> shared_memory_;
+ 
+diff --git a/src/xenia/gpu/dxbc_shader_translator.cc b/src/xenia/gpu/dxbc_shader_translator.cc
+index df36346..5653c8e 100644
+--- a/src/xenia/gpu/dxbc_shader_translator.cc
++++ b/src/xenia/gpu/dxbc_shader_translator.cc
+@@ -2215,7 +2215,10 @@ constexpr DxbcShaderTranslator::SystemConstantRdef
+          sizeof(uint32_t) * 32},
+ 
+         {"xe_param_gen_window_offset", ShaderRdefTypeIndex::kFloat2,
+-         sizeof(float) * 2, sizeof(uint32_t) * 2},
++         sizeof(float) * 2},
++        // gow2: upscaler LOD bias (patch 0014).
++        {"xe_gow2_mip_bias", ShaderRdefTypeIndex::kFloat, sizeof(float),
++         sizeof(uint32_t)},
+ };
+ 
+ void DxbcShaderTranslator::WriteResourceDefinition() {
+diff --git a/src/xenia/gpu/dxbc_shader_translator.h b/src/xenia/gpu/dxbc_shader_translator.h
+index 2c66e3a..d3a4868 100644
+--- a/src/xenia/gpu/dxbc_shader_translator.h
++++ b/src/xenia/gpu/dxbc_shader_translator.h
+@@ -430,7 +430,10 @@ class DxbcShaderTranslator : public ShaderTranslator {
+     // is carried in the EDRAM bases rather than the viewport.
+     // 0 when it's in the viewport.
+     float param_gen_window_offset[2];
+-    uint32_t param_gen_window_offset_padding[2];
++    // gow2: temporal upscaler LOD bias added to fetches with computed LOD,
++    // 0 outside scene draws (patch 0014).
++    float gow2_mip_bias;
++    uint32_t gow2_mip_bias_padding;
+ 
+    private:
+     friend class DxbcShaderTranslator;
+@@ -488,6 +491,8 @@ class DxbcShaderTranslator : public ShaderTranslator {
+       kTextureIntegerScaleBits,
+ 
+       kParamGenWindowOffset,
++      // gow2: patch 0014.
++      kGow2MipBias,
+ 
+       kCount,
+     };
+diff --git a/src/xenia/gpu/dxbc_shader_translator_fetch.cc b/src/xenia/gpu/dxbc_shader_translator_fetch.cc
+index 1d5af1a..00bbf7c 100644
+--- a/src/xenia/gpu/dxbc_shader_translator_fetch.cc
++++ b/src/xenia/gpu/dxbc_shader_translator_fetch.cc
+@@ -1743,6 +1743,15 @@ void DxbcShaderTranslator::ProcessTextureFetchInstruction(
+           }
+         }
+         if (use_computed_lod) {
++          // gow2: temporal upscaler LOD bias, in pixel shaders only
++          // (follows the rendered pixels; VS only have register gradients)
++          // (patch 0014).
++          if (is_pixel_shader()) {
++            a_.OpAdd(lod_dest, lod_src,
++                     LoadSystemConstant(SystemConstants::Index::kGow2MipBias,
++                                        offsetof(SystemConstants, gow2_mip_bias),
++                                        dxbc::Src::kXXXX));
++          }
+           grad_v_temp = PushSystemTemp();
+           switch (coordinate_dimension) {
+             case xenos::FetchOpDimension::k1D:
+diff --git a/src/xenia/gpu/shaders/xenos_draw.hlsli b/src/xenia/gpu/shaders/xenos_draw.hlsli
+index 54e5dc1..9c124ca 100644
+--- a/src/xenia/gpu/shaders/xenos_draw.hlsli
++++ b/src/xenia/gpu/shaders/xenos_draw.hlsli
+@@ -53,6 +53,8 @@ cbuffer xe_system_cbuffer : register(b0) {
+   uint4 xe_texture_integer_scale_bits[8];
+ 
+   float2 xe_param_gen_window_offset;
++  // gow2: upscaler LOD bias (patch 0014).
++  float xe_gow2_mip_bias;
+ };
+ 
+ struct XeHSControlPointInputIndexed {

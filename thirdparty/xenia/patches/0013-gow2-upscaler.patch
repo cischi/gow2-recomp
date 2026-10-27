@@ -1,0 +1,255 @@
+diff --git a/src/xenia/gpu/d3d12/d3d12_command_processor.cc b/src/xenia/gpu/d3d12/d3d12_command_processor.cc
+index bc4a31b..ef53494 100644
+--- a/src/xenia/gpu/d3d12/d3d12_command_processor.cc
++++ b/src/xenia/gpu/d3d12/d3d12_command_processor.cc
+@@ -111,6 +111,30 @@ void D3D12CommandProcessor::PollCompletedSubmission() {
+   PumpQueryResolves();
+ }
+ 
++// gow2: see d3d12_command_processor.h (patch 0013).
++bool D3D12CommandProcessor::Gow2CopyRect(ID3D12Resource* src,
++                                         D3D12_RESOURCE_STATES src_state,
++                                         ID3D12Resource* dst, uint32_t width,
++                                         uint32_t height) {
++  const D3D12_RESOURCE_DESC desc = src->GetDesc();
++  if (!dst || width > desc.Width || height > desc.Height) {
++    return false;
++  }
++  PushTransitionBarrier(src, src_state, D3D12_RESOURCE_STATE_COPY_SOURCE);
++  SubmitBarriers();
++  D3D12_TEXTURE_COPY_LOCATION src_location = {};
++  src_location.pResource = src;
++  src_location.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
++  D3D12_TEXTURE_COPY_LOCATION dst_location = {};
++  dst_location.pResource = dst;
++  dst_location.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
++  D3D12_BOX box = {0, 0, 0, width, height, 1};
++  deferred_command_list_.D3DCopyTextureRegion(&dst_location, 0, 0, 0,
++                                              &src_location, &box);
++  PushTransitionBarrier(src, D3D12_RESOURCE_STATE_COPY_SOURCE, src_state);
++  return true;
++}
++
+ bool D3D12CommandProcessor::PushTransitionBarrier(
+     ID3D12Resource* resource, D3D12_RESOURCE_STATES old_state,
+     D3D12_RESOURCE_STATES new_state, UINT subresource) {
+@@ -2912,6 +2936,22 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
+   // positions (patch 0009).
+   gviargs.msaa_2x_sample_0_to_console =
+       host_render_targets_used && !xenos_sample_positions_used_;
++  // gow2: upscaler jitter on draws with a depth test on the scene
++  // surfaces (2x MSAA geometry and 1x lights with the same pitch, which
++  // test the geometry's depth), not on depth restores from a texture
++  // (pixel shader writing depth with an ALWAYS test: the texture already
++  // holds the shifted geometry) nor on shadow maps and surfaces of
++  // another size; the serial number in padding_set_to_0 invalidates the
++  // cached viewport when the jitter changes (patch 0013).
++  if ((gow2_jitter_xy_[0] != 0.0f || gow2_jitter_xy_[1] != 0.0f) &&
++      normalized_depth_control.z_enable &&
++      regs.Get<reg::RB_SURFACE_INFO>().surface_pitch == gow2_jitter_pitch_ &&
++      !(pixel_shader && pixel_shader->writes_depth() &&
++        normalized_depth_control.zfunc == xenos::CompareFunction::kAlways)) {
++    gviargs.gow2_jitter_xy[0] = gow2_jitter_xy_[0];
++    gviargs.gow2_jitter_xy[1] = gow2_jitter_xy_[1];
++    gviargs.padding_set_to_0 = gow2_jitter_serial_;
++  }
+ 
+   if (gviargs == previous_viewport_info_args_) {
+     viewport_info = previous_viewport_info_;
+diff --git a/src/xenia/gpu/d3d12/d3d12_command_processor.h b/src/xenia/gpu/d3d12/d3d12_command_processor.h
+index e42fdbb..d02b50b 100644
+--- a/src/xenia/gpu/d3d12/d3d12_command_processor.h
++++ b/src/xenia/gpu/d3d12/d3d12_command_processor.h
+@@ -109,6 +109,30 @@ class D3D12CommandProcessor : public CommandProcessor {
+     queue_operations_done_since_submission_signal_ = true;
+   }
+ 
++  // gow2: temporal upscaler jitter in guest px, applied by IssueDraw
++  // to draws with an active depth test on surfaces with pitch
++  // surface_pitch (the scene's), except depth restores
++  // (see IssueDraw); (0, 0) = no effect (patch 0013).
++  void SetGow2Jitter(float x, float y, uint32_t surface_pitch) {
++    gow2_jitter_pitch_ = surface_pitch;
++    if (x == gow2_jitter_xy_[0] && y == gow2_jitter_xy_[1]) return;
++    gow2_jitter_xy_[0] = x;
++    gow2_jitter_xy_[1] = y;
++    if (++gow2_jitter_serial_ == 0) gow2_jitter_serial_ = 1;
++  }
++  // gow2: copies for the upscaler after a draw (patch 0013, see
++  // D3D12RenderTargetCache::Gow2CopyColorTarget0 and
++  // D3D12TextureCache::Gow2CopyActiveTexture).
++  D3D12RenderTargetCache& Gow2RenderTargetCache() const {
++    return *render_target_cache_;
++  }
++  D3D12TextureCache& Gow2TextureCache() const { return *texture_cache_; }
++  // gow2: copies the rectangle (0, 0, w, h) of src (state src_state) into dst
++  // (state COPY_DEST) in the current command list, then src returns to
++  // src_state; false if the rectangle exceeds src or dst is null (patch 0013).
++  bool Gow2CopyRect(ID3D12Resource* src, D3D12_RESOURCE_STATES src_state,
++                    ID3D12Resource* dst, uint32_t width, uint32_t height);
++
+   uint64_t GetCurrentFrame() const { return frame_current_; }
+   uint64_t GetCompletedFrame() const { return frame_completed_; }
+ 
+@@ -622,6 +646,12 @@ class D3D12CommandProcessor : public CommandProcessor {
+   // without tier 1 support.
+   bool xenos_sample_positions_used_ = false;
+ 
++  // gow2: upscaler jitter and its serial number (never 0 after the first
++  // SetGow2Jitter), see SetGow2Jitter (patch 0013).
++  float gow2_jitter_xy_[2] = {};
++  uint32_t gow2_jitter_serial_ = 0;
++  uint32_t gow2_jitter_pitch_ = 0;
++
+   std::unique_ptr<D3D12SharedMemory> shared_memory_;
+ 
+   std::unique_ptr<D3D12RenderTargetCache> render_target_cache_;
+diff --git a/src/xenia/gpu/d3d12/d3d12_render_target_cache.cc b/src/xenia/gpu/d3d12/d3d12_render_target_cache.cc
+index ac03287..60f7f82 100644
+--- a/src/xenia/gpu/d3d12/d3d12_render_target_cache.cc
++++ b/src/xenia/gpu/d3d12/d3d12_render_target_cache.cc
+@@ -2113,6 +2113,35 @@ void D3D12RenderTargetCache::TransitionEdramBuffer(
+   edram_buffer_state_ = new_state;
+ }
+ 
++// gow2: see d3d12_render_target_cache.h (patch 0013).
++ID3D12Resource* D3D12RenderTargetCache::Gow2ColorTarget0() const {
++  if (GetPath() != Path::kHostRenderTargets) {
++    return nullptr;
++  }
++  auto* render_target = static_cast<D3D12RenderTarget*>(
++      last_update_accumulated_render_targets()[1]);
++  return render_target ? render_target->resource() : nullptr;
++}
++
++bool D3D12RenderTargetCache::Gow2CopyColorTarget0(ID3D12Resource* dst,
++                                                  uint32_t width,
++                                                  uint32_t height) {
++  if (GetPath() != Path::kHostRenderTargets) {
++    return false;
++  }
++  auto* render_target = static_cast<D3D12RenderTarget*>(
++      last_update_accumulated_render_targets()[1]);
++  if (!render_target) {
++    return false;
++  }
++  // The tracked state stays as before: the copy restores it.
++  const D3D12_RESOURCE_STATES state =
++      render_target->SetResourceState(D3D12_RESOURCE_STATE_COPY_SOURCE);
++  render_target->SetResourceState(state);
++  return command_processor_.Gow2CopyRect(render_target->resource(), state, dst,
++                                         width, height);
++}
++
+ void D3D12RenderTargetCache::TransitionRenderTarget(
+     D3D12RenderTarget& render_target, D3D12_RESOURCE_STATES new_state) {
+   D3D12_RESOURCE_STATES old_state = render_target.SetResourceState(new_state);
+diff --git a/src/xenia/gpu/d3d12/d3d12_render_target_cache.h b/src/xenia/gpu/d3d12/d3d12_render_target_cache.h
+index 650c92b..0aff355 100644
+--- a/src/xenia/gpu/d3d12/d3d12_render_target_cache.h
++++ b/src/xenia/gpu/d3d12/d3d12_render_target_cache.h
+@@ -135,6 +135,15 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
+   static DXGI_FORMAT GetDepthSRVStencilDXGIFormat(
+       xenos::DepthRenderTargetFormat format);
+ 
++  // gow2: color render target 0 of the last Update (host render target
++  // path), for the upscaler copies; nullptr if absent or with ROV. The
++  // copy of the rectangle (0, 0, w, h) into dst (state COPY_DEST) goes into
++  // the current command list, leaving the render target in its prior state
++  // (patch 0013).
++  ID3D12Resource* Gow2ColorTarget0() const;
++  bool Gow2CopyColorTarget0(ID3D12Resource* dst, uint32_t width,
++                            uint32_t height);
++
+  protected:
+   bool IsGammaFormatHostStorageSeparate() const override;
+ 
+diff --git a/src/xenia/gpu/d3d12/d3d12_texture_cache.cc b/src/xenia/gpu/d3d12/d3d12_texture_cache.cc
+index 1cc5ac1..4d1e4e7 100644
+--- a/src/xenia/gpu/d3d12/d3d12_texture_cache.cc
++++ b/src/xenia/gpu/d3d12/d3d12_texture_cache.cc
+@@ -1236,6 +1236,31 @@ D3D12TextureCache::GetCurrentScaledResolveRangeGPUAddress() const {
+           (uint64_t(buffer_index) << 30));
+ }
+ 
++// gow2: see d3d12_texture_cache.h (patch 0013).
++ID3D12Resource* D3D12TextureCache::Gow2ActiveTexture(
++    uint32_t fetch_constant_index) const {
++  const TextureBinding* binding = GetValidTextureBinding(fetch_constant_index);
++  return binding && binding->texture
++             ? static_cast<D3D12Texture*>(binding->texture)->resource()
++             : nullptr;
++}
++
++bool D3D12TextureCache::Gow2CopyActiveTexture(uint32_t fetch_constant_index,
++                                              ID3D12Resource* dst,
++                                              uint32_t width, uint32_t height) {
++  const TextureBinding* binding = GetValidTextureBinding(fetch_constant_index);
++  if (!binding || !binding->texture) {
++    return false;
++  }
++  auto* texture = static_cast<D3D12Texture*>(binding->texture);
++  // The tracked state stays as before: the copy restores it.
++  const D3D12_RESOURCE_STATES state =
++      texture->SetResourceState(D3D12_RESOURCE_STATE_COPY_SOURCE);
++  texture->SetResourceState(state);
++  return command_processor_.Gow2CopyRect(texture->resource(), state, dst,
++                                         width, height);
++}
++
+ ID3D12Resource* D3D12TextureCache::RequestSwapTexture(
+     D3D12_SHADER_RESOURCE_VIEW_DESC& srv_desc_out,
+     xenos::TextureFormat& format_out) {
+diff --git a/src/xenia/gpu/d3d12/d3d12_texture_cache.h b/src/xenia/gpu/d3d12/d3d12_texture_cache.h
+index 7f03443..043f28d 100644
+--- a/src/xenia/gpu/d3d12/d3d12_texture_cache.h
++++ b/src/xenia/gpu/d3d12/d3d12_texture_cache.h
+@@ -144,6 +144,16 @@ class D3D12TextureCache final : public TextureCache {
+   // MakeScaledResolveRangeCurrent call.
+   D3D12_GPU_VIRTUAL_ADDRESS GetCurrentScaledResolveRangeGPUAddress() const;
+   void TransitionCurrentScaledResolveRange(D3D12_RESOURCE_STATES new_state);
++
++  // gow2: host texture of the fetch constant's active binding (since the last
++  // RequestTextures), for the upscaler copies; nullptr if not valid. The
++  // copy of the rectangle (0, 0, w, h) into dst (state COPY_DEST) goes into
++  // the current command list, leaving the texture in its prior state (patch
++  // 0013).
++  ID3D12Resource* Gow2ActiveTexture(uint32_t fetch_constant_index) const;
++  bool Gow2CopyActiveTexture(uint32_t fetch_constant_index,
++                             ID3D12Resource* dst, uint32_t width,
++                             uint32_t height);
+   void MarkCurrentScaledResolveRangeUAVWritesCommitNeeded() {
+     assert_true(IsDrawResolutionScaled());
+     GetCurrentScaledResolveBuffer().SetUAVBarrierPending();
+diff --git a/src/xenia/gpu/draw_util.cc b/src/xenia/gpu/draw_util.cc
+index 1b0808e..b5a39a8 100644
+--- a/src/xenia/gpu/draw_util.cc
++++ b/src/xenia/gpu/draw_util.cc
+@@ -521,6 +521,11 @@ void GetHostViewportInfo(GetViewportInfoArgs* XE_RESTRICT args,
+       }
+     }
+   }
++  // gow2: temporal upscaler jitter, in guest px, after the Xenos positions
++  // correction (which only recognizes the exact sample fractions)
++  // (patch 0013).
++  offset_add_xy[0] += args->gow2_jitter_xy[0];
++  offset_add_xy[1] += args->gow2_jitter_xy[1];
+ 
+   // The maximum value is at least the maximum host render target size anyway -
+   // and a guest pixel is always treated as a whole with resolution scaling.
+diff --git a/src/xenia/gpu/draw_util.h b/src/xenia/gpu/draw_util.h
+index c505ce1..d8c70c5 100644
+--- a/src/xenia/gpu/draw_util.h
++++ b/src/xenia/gpu/draw_util.h
+@@ -403,6 +403,11 @@ struct GetViewportInfoArgs {
+   };
+ 
+   // everything that follows here does not need to be compared.
++  // gow2: temporal upscaler jitter in guest px, added to the viewport
++  // offset; IssueDraw sets it only on scene draws and puts a jitter serial
++  // number in padding_set_to_0, so the comparison with the previous viewport
++  // stays valid (patch 0013).
++  float gow2_jitter_xy[2] = {};
+   divisors::MagicDiv draw_resolution_scale_x_divisor;
+   divisors::MagicDiv draw_resolution_scale_y_divisor;
+   void Setup(uint32_t _draw_resolution_scale_x,

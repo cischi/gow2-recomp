@@ -1,0 +1,58 @@
+diff --git a/src/xenia/gpu/pm4_command_processor_implement.h b/src/xenia/gpu/pm4_command_processor_implement.h
+index 1d9b7d9..37b52fa 100644
+--- a/src/xenia/gpu/pm4_command_processor_implement.h
++++ b/src/xenia/gpu/pm4_command_processor_implement.h
+@@ -731,10 +731,15 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_WAIT_REG_MEM(
+ 
+   bool is_memory = (wait_info & 0x10) != 0;
+   assert_true(is_memory || poll_reg_addr < RegisterFile::kRegisterCount);
++  // gow2: a register outside the RegisterFile is not read out of the array
++  // (the value still comes from gow2_ReadRegisterForWait).
+   const volatile uint32_t& value_ref =
+       is_memory ? *reinterpret_cast<uint32_t*>(memory_->TranslatePhysical(
+                       poll_reg_addr & ~uint32_t(0x3)))
+-                : register_file_->values[poll_reg_addr];
++                : register_file_->values[poll_reg_addr <
++                                                 RegisterFile::kRegisterCount
++                                             ? poll_reg_addr
++                                             : 0];
+ 
+   bool matched = false;
+ 
+@@ -750,6 +755,11 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_WAIT_REG_MEM(
+         MakeCoherent();
+         value = value_ref;
+       }
++      // gow2: the CPU writes registers into the guest region, not into the
++      // RegisterFile: read from there. Exception COHER_STATUS_HOST: MakeCoherent
++      // clears it in the RegisterFile, so it is read from there and copied
++      // into the region (see gow2_ReadRegisterForWait).
++      value = graphics_system_->gow2_ReadRegisterForWait(poll_reg_addr);
+     }
+     matched = MatchValueAndRef(value & mask, ref, wait_info);
+ 
+@@ -761,7 +771,10 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_WAIT_REG_MEM(
+           // User wants it fast and dangerous.
+           // do nothing
+         } else {
+-          xe::threading::Sleep(std::chrono::milliseconds(wait / 0x100));
++          // gow2: in steps of at most 1 ms (wait reaches 0xFFFFFF, over
++          // 65 s), so Shutdown does not wait.
++          xe::threading::Sleep(
++              std::chrono::milliseconds(std::min(wait / 0x100, uint32_t(1))));
+           ReturnFromWait();
+         }
+ 
+@@ -770,6 +783,12 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_WAIT_REG_MEM(
+           return false;
+         }
+       } else {
++        // gow2: short waits yield the processor and stop at Shutdown
++        // (in canary they spin without checking).
++        xe::threading::MaybeYield();
++        if (!worker_running_) {
++          return false;
++        }
+       }
+     }
+   } while (!matched);

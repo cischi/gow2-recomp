@@ -1,0 +1,221 @@
+# XenonRecomp configuration for Gears of War 2 (default.xex, base 0x82000000).
+# XenonRecomp resolves relative paths against the folder of this file.
+
+[main]
+file_path = "../game_data/default.xex"
+out_directory_path = "../build/generated"
+switch_table_file_path = "gow2_switch_tables.toml"
+
+skip_lr = false
+skip_msr = false
+ctr_as_local = false
+xer_as_local = false
+reserved_as_local = false
+cr_as_local = false
+non_argument_as_local = false
+non_volatile_as_local = false
+
+# Register save/restore helpers: output of
+#   python tools/find_helpers.py build/xex/image.bin build/xex/info.json
+savegprlr_14_address = 0x82A930A0
+restgprlr_14_address = 0x82A930F0
+savefpr_14_address = 0x82A93400
+restfpr_14_address = 0x82A9344C
+savevmx_14_address = 0x82A94250
+restvmx_14_address = 0x82A944E8
+savevmx_64_address = 0x82A942E4
+restvmx_64_address = 0x82A9457C
+
+# CRT setjmp/longjmp, found by searching for the routines that save and restore
+# f14-f31, r13-r31, v64-v127, LR (+308), CR (+304) and r1 (+144) in the buffer pointed to by r3.
+# setjmp: mflr r0 / mfcr r4 / stfd f14,0(r3) ... / std r1,144(r3) / li r3,0 / blr
+# longjmp: lfd f14,0(r7) ... / lwz r5,308(r7) / mtlr r5 / ld r1,144(r7) / mr r3,r6 / blr
+setjmp_address = 0x82A93D90
+longjmp_address = 0x82A93950
+
+# Data (not code) to skip in the linear scan of .text. Every function
+# with exception handling is preceded by 8 bytes: the pointer to the handler
+# and the pointer to its scope data. XenonRecomp used to decode them as code
+# (lwz ...) and the resulting fragment swallowed the real following function
+# (known from .pdata), with switches outside functions and unresolved jumps. The three words
+# appear in .text only at this position (722 + 57 + 1 times, always 8
+# bytes from a .pdata start), so skipping them does not hide code.
+invalid_instructions = [
+    { data = 0x82CD5760, size = 8 }, # C++ handler (__CxxFrameHandler) + scope table
+    { data = 0x82F4D43C, size = 8 }, # __C_specific_handler thunk (xboxkrnl, ordinal 421) + scope table
+    { data = 0x82CD7F80, size = 8 }, # third handler, a single use + scope table
+]
+
+# Function boundaries corrected by hand (generated with a
+# recursive-descent analysis that also follows the switch tables of gow2_switch_tables.toml).
+#
+# 1) Functions with switches not covered by .pdata: XenonRecomp's Function::Analyze
+#    does not know jump tables and closes the function at the bctr, so the cases
+#    ended up in separate functions ("Switch case ... is trying to jump outside
+#    function"). The size moves the end of the function past the last case.
+# 2) A thunk that jumps into the following function: Function::Analyze followed
+#    the jump and the fragment swallowed the other function with its switch.
+# 3) Functions truncated by Function::Analyze or by .pdata, which left jumps
+#    (b) to addresses that are not function starts ("// ERROR <addr>" in the
+#    generated C++).
+# 4) Functions without .pdata with an inline switch (table right after the bctr,
+#    without a cmplwi/bgt before it): the linear scan closed the function at the bctr and
+#    decoded the table as code, swallowing the first case. Output of
+#      python tools/find_missing_functions.py build/xex/image.bin build/xex/info.json
+#        build/generated/ppc_func_mapping.cpp --switch-tables config/gow2_switch_tables.toml
+#    (the tables are in gow2_switch_tables.toml).
+functions = [
+    { address = 0x82230368, size = 0x214 }, # switch loaded at 0x82230378: the function ends (exclusive) at 0x8223057C
+    { address = 0x82230580, size = 0x1F8 }, # switch loaded at 0x82230590: the function ends (exclusive) at 0x82230778
+    { address = 0x822F0808, size = 0x70 }, # switch loaded at 0x822F0810: the function ends (exclusive) at 0x822F0878
+    { address = 0x822FF238, size = 0x134 }, # inline switch loaded at 0x822FF23C: the function ends (exclusive) at 0x822FF36C
+    { address = 0x823140D0, size = 0x88 }, # switch loaded at 0x823140DC: the function ends (exclusive) at 0x82314158
+    { address = 0x82316408, size = 0xF8 }, # inline switch loaded at 0x82316408: the function ends (exclusive) at 0x82316500
+    { address = 0x82338E30, size = 0x7C }, # switch loaded at 0x82338E38: the function ends (exclusive) at 0x82338EAC
+    { address = 0x8234E1F8, size = 0x68 }, # switch loaded at 0x8234E200: the function ends (exclusive) at 0x8234E260
+    { address = 0x8235A2C8, size = 0x84 }, # switch loaded at 0x8235A2D4: the function ends (exclusive) at 0x8235A34C
+    { address = 0x8235AF88, size = 0xA0 }, # switch loaded at 0x8235AF94: the function ends (exclusive) at 0x8235B028
+    { address = 0x82387E88, size = 0xB8 }, # switch loaded at 0x82387EB4: the function ends (exclusive) at 0x82387F40
+    { address = 0x82387F40, size = 0xB8 }, # switch loaded at 0x82387F6C: the function ends (exclusive) at 0x82387FF8
+    { address = 0x823B9190, size = 0x94 }, # Function::Analyze closes the function at the first unconditional b whose following branches it does not follow (unoptimized code with dead b instructions); real end at the blr at 0x823B9220
+    { address = 0x823CDF98, size = 0x64 }, # Function::Analyze closes the function at the first unconditional b whose following branches it does not follow (unoptimized code with dead b instructions); real end at the blr at 0x823CDFF8
+    { address = 0x823CE780, size = 0x1B8 }, # switch loaded at 0x823CE7BC: the function ends (exclusive) at 0x823CE938
+    { address = 0x823CE988, size = 0xD0 }, # Function::Analyze closes the function at the first unconditional b whose following branches it does not follow (unoptimized code with dead b instructions); real end at the blr at 0x823CEA54
+    { address = 0x823CF010, size = 0x158 }, # Function::Analyze closes the function at the first unconditional b whose following branches it does not follow (unoptimized code with dead b instructions); real end at the blr at 0x823CF164
+    { address = 0x823D0458, size = 0x12C }, # switch loaded at 0x823D04A8: the function ends (exclusive) at 0x823D0584
+    { address = 0x82536250, size = 0x1E4 }, # switch loaded at 0x82536370: the function ends (exclusive) at 0x82536434
+    { address = 0x82540CC0, size = 0xB8 }, # switch loaded at 0x82540CE0: the function ends (exclusive) at 0x82540D78
+    { address = 0x825F66C0, size = 0x118 }, # switch loaded at 0x825F66CC: the function ends (exclusive) at 0x825F67D8
+    { address = 0x82669668, size = 0x98 }, # switch loaded at 0x8266967C: the function ends (exclusive) at 0x82669700
+    { address = 0x82688150, size = 0x50 }, # switch loaded at 0x82688160: the function ends (exclusive) at 0x826881A0
+    { address = 0x826881E8, size = 0x90 }, # switch loaded at 0x82688220: the function ends (exclusive) at 0x82688278
+    { address = 0x827A7088, size = 0x8C }, # switch loaded at 0x827A7090: the function ends (exclusive) at 0x827A7114
+    { address = 0x827E2398, size = 0xA4 }, # switch loaded at 0x827E23A4: the function ends (exclusive) at 0x827E243C
+    { address = 0x828027B8, size = 0x6C }, # switch loaded at 0x828027D4: the function ends (exclusive) at 0x82802824
+    { address = 0x828032A8, size = 0x50 }, # switch loaded at 0x828032B0: the function ends (exclusive) at 0x828032F8
+    { address = 0x82807620, size = 0xBC }, # switch loaded at 0x8280764C: the function ends (exclusive) at 0x828076DC
+    { address = 0x8280A1C8, size = 0x7C }, # switch loaded at 0x8280A1D0: the function ends (exclusive) at 0x8280A244
+    { address = 0x8280A248, size = 0x80 }, # switch loaded at 0x8280A254: the function ends (exclusive) at 0x8280A2C8
+    { address = 0x8280A2C8, size = 0x98 }, # switch loaded at 0x8280A2D4: the function ends (exclusive) at 0x8280A360
+    { address = 0x8281E910, size = 0x458 }, # switch loaded at 0x8281E938: the function ends (exclusive) at 0x8281ED68
+    { address = 0x82825C28, size = 0x270 }, # switch loaded at 0x82825C50: the function ends (exclusive) at 0x82825E98
+    { address = 0x8282A608, size = 0x94 }, # switch loaded at 0x8282A618: the function ends (exclusive) at 0x8282A69C (beyond the limit 82F4CCDC)
+    { address = 0x82861438, size = 0x100 }, # switch loaded at 0x82861450: the function ends (exclusive) at 0x82861538
+    { address = 0x82976C98, size = 0xEC }, # switch loaded at 0x82976CB4: the function ends (exclusive) at 0x82976D84
+    { address = 0x8299D3F8, size = 0x18 }, # thunk (mr r11,r6 ... b sub_8299D410): Analyze followed the b into sub_8299D410 and the fragment contained its switch
+    { address = 0x829EB1F8, size = 0x114 }, # switch loaded at 0x829EB218: the function ends (exclusive) at 0x829EB30C
+    { address = 0x82A39C00, size = 0x110 }, # switch loaded at 0x82A39C1C: the function ends (exclusive) at 0x82A39D10
+    { address = 0x82B3E728, size = 0x480 }, # function with catch: after the funclets (.pdata 0x82B3EACC, 0x82B3EB28) comes its epilogue at 0x82B3EB88, reached with b; .pdata says 0x39C
+    { address = 0x82B47F00, size = 0x5C }, # Function::Analyze closes the function at the first unconditional b whose following branches it does not follow (unoptimized code with dead b instructions); real end at the blr at 0x82B47F58
+    { address = 0x82B47F60, size = 0x5C }, # Function::Analyze closes the function at the first unconditional b whose following branches it does not follow (unoptimized code with dead b instructions); real end at the blr at 0x82B47FB8
+    { address = 0x82B4F118, size = 0x5C4 }, # switch loaded at 0x82B4F3BC: the function ends (exclusive) at 0x82B4F6DC
+    { address = 0x82B64840, size = 0x47C }, # like 0x82B3E728: funclets at 0x82B64BE0/0x82B64C3C, parent epilogue at 0x82B64C9C; .pdata says 0x398
+    { address = 0x82B65690, size = 0xCC }, # Function::Analyze closes the function at the first unconditional b whose following branches it does not follow (unoptimized code with dead b instructions); real end at the blr at 0x82B65758
+    { address = 0x82B6E030, size = 0x90 }, # Function::Analyze closes the function at the first unconditional b whose following branches it does not follow (unoptimized code with dead b instructions); real end at the blr at 0x82B6E0BC
+    { address = 0x82B6E570, size = 0x6C }, # Function::Analyze closes the function at the first unconditional b whose following branches it does not follow (unoptimized code with dead b instructions); real end at the blr at 0x82B6E5D8
+    { address = 0x82B74D10, size = 0x3C }, # Function::Analyze closes the function at the first unconditional b whose following branches it does not follow (unoptimized code with dead b instructions); real end at the blr at 0x82B74D48
+    { address = 0x82B8D260, size = 0x47C }, # like 0x82B3E728: funclets at 0x82B8D600/0x82B8D65C, parent epilogue at 0x82B8D6BC; .pdata says 0x398
+    { address = 0x82BC3950, size = 0x80 }, # switch loaded at 0x82BC3964: the function ends (exclusive) at 0x82BC39D0
+    { address = 0x82C66ED8, size = 0x78 }, # switch loaded at 0x82C66EE4: the function ends (exclusive) at 0x82C66F50
+    { address = 0x82CB3AA0, size = 0x68 }, # switch loaded at 0x82CB3AA8: the function ends (exclusive) at 0x82CB3B08
+    { address = 0x82CB3B08, size = 0x64 }, # switch loaded at 0x82CB3B14: the function ends (exclusive) at 0x82CB3B6C
+    { address = 0x82CB3B70, size = 0x5C }, # switch loaded at 0x82CB3B7C: the function ends (exclusive) at 0x82CB3BCC
+    { address = 0x82CB3BD0, size = 0x198 }, # switch loaded at 0x82CB3BDC: the function ends (exclusive) at 0x82CB3D68
+    { address = 0x82CB3D68, size = 0x16C }, # switch loaded at 0x82CB3D78: the function ends (exclusive) at 0x82CB3ED4
+    { address = 0x82CD9E50, size = 0x58 }, # switch loaded at 0x82CD9E60: the function ends (exclusive) at 0x82CD9EA8
+    { address = 0x82CD9EA8, size = 0x58 }, # switch loaded at 0x82CD9EB8: the function ends (exclusive) at 0x82CD9F00
+    { address = 0x82CD9FE0, size = 0x58 }, # switch loaded at 0x82CD9FF0: the function ends (exclusive) at 0x82CDA038
+    { address = 0x82D06B70, size = 0x5C }, # switch loaded at 0x82D06B80: the function ends (exclusive) at 0x82D06BCC
+    { address = 0x82D06BD0, size = 0x5C }, # switch loaded at 0x82D06BE0: the function ends (exclusive) at 0x82D06C2C
+    { address = 0x82D06C30, size = 0x68 }, # switch loaded at 0x82D06C40: the function ends (exclusive) at 0x82D06C98
+    { address = 0x82D06C98, size = 0x4C }, # switch loaded at 0x82D06CA8: the function ends (exclusive) at 0x82D06CE4
+    { address = 0x82D48128, size = 0x50 }, # switch loaded at 0x82D48134: the function ends (exclusive) at 0x82D48178
+    { address = 0x82DB0770, size = 0x54 }, # switch loaded at 0x82DB077C: the function ends (exclusive) at 0x82DB07C4
+    { address = 0x82DB4920, size = 0x344 }, # switch loaded at 0x82DB492C: the function ends (exclusive) at 0x82DB4C64
+    { address = 0x82E750C0, size = 0x18C }, # switch loaded at 0x82E7513C: the function ends (exclusive) at 0x82E7524C
+    { address = 0x82EF5C30, size = 0x108 }, # switch loaded at 0x82EF5CC0 (table added by hand in gow2_switch_tables.toml): the function ends (exclusive) at 0x82EF5D38
+]
+
+# Game patches (runtime/game_patches): hooks before the instruction; true = the original lwz is skipped (li reg,0).
+[[midasm_hook]]
+name = "Gow2PatchMotionBlur" # lwz r11,0x2C(r10)
+address = 0x8236004C
+registers = ["r11"]
+jump_address_on_true = 0x82360050
+
+[[midasm_hook]]
+name = "Gow2PatchLensFlares" # lwz r10,0x48(r11)
+address = 0x827B817C
+registers = ["r10"]
+jump_address_on_true = 0x827B8180
+
+[[midasm_hook]]
+name = "Gow2PatchBloom1" # lwz r10,0x38(r10)
+address = 0x824ECEF8
+registers = ["r10"]
+jump_address_on_true = 0x824ECEFC
+
+[[midasm_hook]]
+name = "Gow2PatchBloom2" # lwz r11,0x38(r10)
+address = 0x824ED078
+registers = ["r11"]
+jump_address_on_true = 0x824ED07C
+
+[[midasm_hook]]
+name = "Gow2PatchBloom3" # lwz r10,0x38(r11)
+address = 0x824ED0A4
+registers = ["r10"]
+jump_address_on_true = 0x824ED0A8
+
+
+# Frame rate (internal patches, [game] frame_rate): present interval and Unlock FPS (illusion, boma).
+[[midasm_hook]]
+name = "Gow2PatchPresentInterval" # li r11,2
+address = 0x8298CFB0
+registers = ["r11"]
+jump_address_on_true = 0x8298CFB4
+
+[[midasm_hook]]
+name = "Gow2PatchUnlockFps" # lfs f1,0x504(r3)
+address = 0x824A2E94
+registers = ["f1"]
+jump_address_on_true = 0x824A2E98
+
+# Engine configuration (internal patch coalesced.no_hash_check, from [engine]):
+# "Disable Coalesced Hash Check" (Sowa_95, boma).
+[[midasm_hook]]
+name = "Gow2PatchCoalescedHash1" # li r3,1
+address = 0x82AA8904
+registers = ["r3"]
+jump_address_on_true = 0x82AA8908
+
+[[midasm_hook]]
+name = "Gow2PatchCoalescedHash2" # mflr r12, first instruction: true = blr
+address = 0x827F9148
+registers = []
+return_on_true = true
+
+# Aspect ratio (internal patches, [video] aspect): 21:9 by boma, TudorHorse; 16:10 at 1280x800 (ratio and ConstrainAspectRatio by boma, TudorHorse).
+[[midasm_hook]]
+name = "Gow2PatchNoConstrainAspect" # beq cr6,0x8252D69C: true = always jump (common to 21:9 and 16:10)
+address = 0x8252D608
+registers = []
+jump_address_on_true = 0x8252D69C
+
+[[midasm_hook]]
+name = "Gow2PatchUwFov" # lfs f0,0x408(r7): f0 from the tangent, f30 = FOV in degrees
+address = 0x8252D73C
+registers = ["f0", "f30"]
+jump_address_on_true = 0x8252D740
+
+[[midasm_hook]]
+name = "Gow2PatchSceneHeight" # li r11,720: 550 at 21:9, 800 at 16:10 (common to both entries)
+address = 0x82806B10
+registers = ["r11"]
+jump_address_on_true = 0x82806B14
+
+[[midasm_hook]]
+name = "Gow2PatchUwUiHeight" # lwz r7,12(r8); mtctr r7; bctrl
+address = 0x826E3720
+registers = ["r3"]
+jump_address_on_true = 0x826E372C

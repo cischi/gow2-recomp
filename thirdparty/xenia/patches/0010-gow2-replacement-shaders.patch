@@ -1,0 +1,70 @@
+diff --git a/src/xenia/gpu/d3d12/pipeline_cache.cc b/src/xenia/gpu/d3d12/pipeline_cache.cc
+index a81b196..e8afaed 100644
+--- a/src/xenia/gpu/d3d12/pipeline_cache.cc
++++ b/src/xenia/gpu/d3d12/pipeline_cache.cc
+@@ -84,6 +84,14 @@ namespace shaders {
+ #include "xenia/gpu/shaders/bytecode/d3d12_5_1/tessellation_indexed_vs.h"
+ }  // namespace shaders
+ 
++// gow2: hook for replacement pixel shaders (set by the runtime).
++static std::atomic<TranslatedPixelShaderHook> translated_pixel_shader_hook{
++    nullptr};
++
++void SetTranslatedPixelShaderHook(TranslatedPixelShaderHook hook) {
++  translated_pixel_shader_hook.store(hook);
++}
++
+ PipelineCache::PipelineCache(D3D12CommandProcessor& command_processor,
+                              const RegisterFile& register_file,
+                              const D3D12RenderTargetCache& render_target_cache,
+@@ -1118,6 +1126,16 @@ bool PipelineCache::TranslateAnalyzedShader(
+     return false;
+   }
+ 
++  // gow2: the runtime may replace the translated pixel shader's DXBC.
++  if (shader.type() == xenos::ShaderType::kPixel) {
++    if (TranslatedPixelShaderHook hook = translated_pixel_shader_hook.load()) {
++      hook(translation,
++           render_target_cache_.GetPath() ==
++               RenderTargetCache::Path::kPixelShaderInterlock,
++           bindless_resources_used_);
++    }
++  }
++
+   const char* host_shader_type;
+   if (shader.type() == xenos::ShaderType::kVertex) {
+     DxbcShaderTranslator::Modification modification(translation.modification());
+diff --git a/src/xenia/gpu/d3d12/pipeline_cache.h b/src/xenia/gpu/d3d12/pipeline_cache.h
+index d1ede5f..26fe959 100644
+--- a/src/xenia/gpu/d3d12/pipeline_cache.h
++++ b/src/xenia/gpu/d3d12/pipeline_cache.h
+@@ -43,6 +43,14 @@ namespace d3d12 {
+ 
+ class D3D12CommandProcessor;
+ 
++// gow2: called after every successful pixel shader translation, before the
++// binding layouts; may replace the binary (the runtime's replacement
++// shaders). From several threads: must be thread-safe. nullptr = no hook.
++using TranslatedPixelShaderHook =
++    void (*)(D3D12Shader::D3D12Translation& translation, bool edram_rov_used,
++             bool bindless_resources_used);
++void SetTranslatedPixelShaderHook(TranslatedPixelShaderHook hook);
++
+ class PipelineCache {
+  public:
+   static constexpr size_t kLayoutUIDEmpty = 0;
+diff --git a/src/xenia/gpu/shader.h b/src/xenia/gpu/shader.h
+index 3ba2056..a84b2dc 100644
+--- a/src/xenia/gpu/shader.h
++++ b/src/xenia/gpu/shader.h
+@@ -803,6 +803,10 @@ class Shader {
+     const std::vector<uint8_t>& translated_binary() const {
+       return translated_binary_;
+     }
++    // gow2: the runtime replaces the translated DXBC (replacement shaders).
++    void ReplaceTranslatedBinary(std::vector<uint8_t> binary) {
++      translated_binary_ = std::move(binary);
++    }
+ 
+     // Gets the translated shader binary as a string.
+     // This is only valid if it is actually text.

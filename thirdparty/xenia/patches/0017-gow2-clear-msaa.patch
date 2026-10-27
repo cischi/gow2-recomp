@@ -1,0 +1,316 @@
+diff --git a/src/xenia/gpu/d3d12/d3d12_command_processor.cc b/src/xenia/gpu/d3d12/d3d12_command_processor.cc
+index dac8cab..9f3f1aa 100644
+--- a/src/xenia/gpu/d3d12/d3d12_command_processor.cc
++++ b/src/xenia/gpu/d3d12/d3d12_command_processor.cc
+@@ -44,6 +44,13 @@ DEFINE_bool(d3d12_submit_on_primary_buffer_end, true,
+ // gow2: with strict occlusion queries the game waits for a result every
+ // frame; closing the submission every N draws starts the GPU earlier and
+ // shortens the wait (patch 0016).
++// gow2: XDK Clear at 4x remapped onto the depth owner's MSAA,
++// without the round-trip EDRAM transfers (patch 0017).
++DEFINE_bool(gow2_clear_msaa_remap, false,
++            "Draw the Xbox 360 D3D clear rectangle (forced 4x MSAA) with the "
++            "MSAA of the depth render target already owning the EDRAM base, "
++            "avoiding ownership transfers.",
++            "D3D12");
+ DEFINE_uint32(d3d12_submit_every_draws, 0,
+               "Submit the command list after this many draws if it's possible "
+               "to submit immediately, so the GPU starts earlier (0 = only at "
+@@ -2665,6 +2672,140 @@ Shader* D3D12CommandProcessor::LoadShader(xenos::ShaderType shader_type,
+   return pipeline_cache_->LoadShader(shader_type, host_address, dword_count);
+ }
+ 
++// gow2: patch 0017, rectangle that rewrites depth and/or stencil with a
++// per-sample value independent of position (ALWAYS test), in screen
++// coordinates (viewport scale and offset off, like the XDK Clear) or with the
++// viewport on, overflowing the surface at the left, top and right.
++static bool Gow2IsClearRectangle(const RegisterFile& regs) {
++  reg::RB_DEPTHCONTROL depth_control =
++      draw_util::GetNormalizedDepthControl(regs);
++  bool writes_depth = depth_control.z_enable && depth_control.z_write_enable;
++  if (!writes_depth && !depth_control.stencil_enable) {
++    return false;
++  }
++  if (depth_control.z_enable &&
++      depth_control.zfunc != xenos::CompareFunction::kAlways) {
++    return false;
++  }
++  if (depth_control.stencil_enable &&
++      (depth_control.stencilfunc != xenos::CompareFunction::kAlways ||
++       (depth_control.backface_enable &&
++        (depth_control.stencilfunc_bf != xenos::CompareFunction::kAlways ||
++         depth_control.stencilzpass_bf != depth_control.stencilzpass)))) {
++    return false;
++  }
++  auto vte = regs.Get<reg::PA_CL_VTE_CNTL>();
++  auto window_offset = regs.Get<reg::PA_SC_WINDOW_OFFSET>();
++  if (window_offset.window_x_offset || window_offset.window_y_offset) {
++    return false;
++  }
++  if (!vte.vport_x_scale_ena && !vte.vport_x_offset_ena &&
++      !vte.vport_y_scale_ena && !vte.vport_y_offset_ena) {
++    return true;
++  }
++  if (!vte.vport_x_scale_ena || !vte.vport_x_offset_ena ||
++      !vte.vport_y_scale_ena || !vte.vport_y_offset_ena) {
++    return false;
++  }
++  float x_scale = std::abs(regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_XSCALE));
++  float x_offset = regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_XOFFSET);
++  float y_scale = std::abs(regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_YSCALE));
++  float y_offset = regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_YOFFSET);
++  // First Xenos sample at 0.25 px from the pixel edge.
++  return x_offset - x_scale <= 0.25f && y_offset - y_scale <= 0.25f &&
++         x_offset + x_scale >=
++             float(regs.Get<reg::RB_SURFACE_INFO>().surface_pitch);
++}
++
++// gow2: patch 0017, owner's MSAA, pitch in pixels, viewport and scissor
++// scaled by the sample ratio; original registers restored at the end of the draw.
++D3D12CommandProcessor::Gow2ClearRemap::~Gow2ClearRemap() {
++  for (uint32_t i = 0; i < saved_count_; ++i) {
++    regs_[saved_[i].first] = saved_[i].second;
++  }
++}
++
++void D3D12CommandProcessor::Gow2ClearRemap::Apply(
++    xenos::MsaaSamples owner_msaa) {
++  auto surface_info = regs_.Get<reg::RB_SURFACE_INFO>();
++  uint32_t scale_x = (surface_info.msaa_samples >= xenos::MsaaSamples::k4X)
++                         ? (owner_msaa >= xenos::MsaaSamples::k4X ? 1 : 2)
++                         : 1;
++  uint32_t scale_y = (surface_info.msaa_samples >= xenos::MsaaSamples::k2X)
++                         ? (owner_msaa >= xenos::MsaaSamples::k2X ? 1 : 2)
++                         : 1;
++  if (surface_info.surface_pitch * scale_x > 0x3FFF) {
++    return;
++  }
++  auto save = [this](uint32_t reg) {
++    saved_[saved_count_++] = std::make_pair(reg, regs_[reg]);
++  };
++  for (uint32_t reg :
++       {uint32_t(XE_GPU_REG_RB_SURFACE_INFO),
++        uint32_t(XE_GPU_REG_PA_CL_VPORT_XSCALE),
++        uint32_t(XE_GPU_REG_PA_CL_VPORT_XOFFSET),
++        uint32_t(XE_GPU_REG_PA_CL_VPORT_YSCALE),
++        uint32_t(XE_GPU_REG_PA_CL_VPORT_YOFFSET),
++        uint32_t(XE_GPU_REG_PA_SC_WINDOW_SCISSOR_TL),
++        uint32_t(XE_GPU_REG_PA_SC_WINDOW_SCISSOR_BR),
++        uint32_t(XE_GPU_REG_PA_SC_SCREEN_SCISSOR_TL),
++        uint32_t(XE_GPU_REG_PA_SC_SCREEN_SCISSOR_BR),
++        uint32_t(XE_GPU_REG_PA_CL_VTE_CNTL)}) {
++    save(reg);
++  }
++  surface_info.msaa_samples = owner_msaa;
++  surface_info.surface_pitch *= scale_x;
++  regs_[XE_GPU_REG_RB_SURFACE_INFO] = surface_info.value;
++  // Host position = x * scale + offset + h (h = 0.5 with the D3D pixel
++  // center, draw_util::GetHostViewportInfo): to get s times the 4x one we need
++  // scale * s and offset * s + (s - 1) * h. Viewport off: scale 1, offset 0.
++  auto vte = regs_.Get<reg::PA_CL_VTE_CNTL>();
++  bool viewport_enabled = vte.vport_x_scale_ena;
++  float half_pixel = (cvars::half_pixel_offset &&
++                      regs_.Get<reg::PA_SU_VTX_CNTL>().pix_center ==
++                          xenos::PixelCenter::kD3DZero)
++                         ? 0.5f
++                         : 0.0f;
++  auto set_float = [this](uint32_t reg, float value) {
++    std::memcpy(&regs_[reg], &value, sizeof(value));
++  };
++  auto get_or = [this, viewport_enabled](uint32_t reg, float disabled) {
++    return viewport_enabled ? regs_.Get<float>(reg) : disabled;
++  };
++  set_float(XE_GPU_REG_PA_CL_VPORT_XSCALE,
++            get_or(XE_GPU_REG_PA_CL_VPORT_XSCALE, 1.0f) * float(scale_x));
++  set_float(XE_GPU_REG_PA_CL_VPORT_YSCALE,
++            get_or(XE_GPU_REG_PA_CL_VPORT_YSCALE, 1.0f) * float(scale_y));
++  set_float(XE_GPU_REG_PA_CL_VPORT_XOFFSET,
++            get_or(XE_GPU_REG_PA_CL_VPORT_XOFFSET, 0.0f) * float(scale_x) +
++                float(scale_x - 1) * half_pixel);
++  set_float(XE_GPU_REG_PA_CL_VPORT_YOFFSET,
++            get_or(XE_GPU_REG_PA_CL_VPORT_YOFFSET, 0.0f) * float(scale_y) +
++                float(scale_y - 1) * half_pixel);
++  vte.vport_x_scale_ena = 1;
++  vte.vport_x_offset_ena = 1;
++  vte.vport_y_scale_ena = 1;
++  vte.vport_y_offset_ena = 1;
++  regs_[XE_GPU_REG_PA_CL_VTE_CNTL] = vte.value;
++  applied_ = true;
++  auto window_tl = regs_.Get<reg::PA_SC_WINDOW_SCISSOR_TL>();
++  auto window_br = regs_.Get<reg::PA_SC_WINDOW_SCISSOR_BR>();
++  window_tl.tl_x = std::min(window_tl.tl_x * scale_x, uint32_t(0x3FFF));
++  window_tl.tl_y = std::min(window_tl.tl_y * scale_y, uint32_t(0x3FFF));
++  window_br.br_x = std::min(window_br.br_x * scale_x, uint32_t(0x3FFF));
++  window_br.br_y = std::min(window_br.br_y * scale_y, uint32_t(0x3FFF));
++  regs_[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_TL] = window_tl.value;
++  regs_[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_BR] = window_br.value;
++  auto screen_tl = regs_.Get<reg::PA_SC_SCREEN_SCISSOR_TL>();
++  auto screen_br = regs_.Get<reg::PA_SC_SCREEN_SCISSOR_BR>();
++  screen_tl.tl_x = std::min(screen_tl.tl_x * int32_t(scale_x), 0x3FFF);
++  screen_tl.tl_y = std::min(screen_tl.tl_y * int32_t(scale_y), 0x3FFF);
++  screen_br.br_x = std::min(screen_br.br_x * int32_t(scale_x), 0x3FFF);
++  screen_br.br_y = std::min(screen_br.br_y * int32_t(scale_y), 0x3FFF);
++  regs_[XE_GPU_REG_PA_SC_SCREEN_SCISSOR_TL] = screen_tl.value;
++  regs_[XE_GPU_REG_PA_SC_SCREEN_SCISSOR_BR] = screen_br.value;
++}
++
+ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
+                                       uint32_t index_count,
+                                       IndexBufferInfo* index_buffer_info,
+@@ -2738,6 +2879,27 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
+       pixel_shader && (pixel_shader->memexport_eM_written() != 0);
+   const bool memexport_used = memexport_used_vertex || memexport_used_pixel;
+ 
++  // gow2: the XDK Clear draws a rectangle with MSAA forced to 4x on the
++  // depth that a target with fewer samples already owns at the same base, and
++  // the ownership change costs two full EDRAM transfers (there and
++  // back). A rectangle without a pixel shader, with an ALWAYS test, scaled by
++  // the sample ratio (viewport, or pixel positions with the viewport off
++  // as in the real Clear) covers the same EDRAM samples with the same values
++  // using the owner's MSAA, where the 4 samples of a 4x pixel lie on the
++  // same side of the edges: registers remapped for the duration of the draw
++  // (patch 0017). 2x owner excluded: patch 0009 shifts
++  // 2x draws by half a pixel.
++  Gow2ClearRemap gow2_clear_remap(*register_file_);
++  if (cvars::gow2_clear_msaa_remap && !memexport_used && !pixel_shader &&
++      primitive_type == xenos::PrimitiveType::kRectangleList &&
++      index_count == 3 && Gow2IsClearRectangle(regs)) {
++    xenos::MsaaSamples owner_msaa;
++    if (render_target_cache_->Gow2GetLowerMsaaDepthOwner(owner_msaa) &&
++        owner_msaa != xenos::MsaaSamples::k2X) {
++      gow2_clear_remap.Apply(owner_msaa);
++    }
++  }
++
+   // A draw contributing to its VIZ ID without the kill bit counts
+   // at hi-Z before the pixel shader can reject anything.
+   if (!viz_survey && pixel_shader &&
+@@ -2957,6 +3119,8 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
+   gow2_scene_draw_ =
+       normalized_depth_control.z_enable &&
+       regs.Get<reg::RB_SURFACE_INFO>().surface_pitch == gow2_jitter_pitch_ &&
++      // gow2: the remapped Clear (patch 0017) stays without jitter, as at 4x.
++      !gow2_clear_remap.applied() &&
+       !(pixel_shader && pixel_shader->writes_depth() &&
+         normalized_depth_control.zfunc == xenos::CompareFunction::kAlways);
+   if ((gow2_jitter_xy_[0] != 0.0f || gow2_jitter_xy_[1] != 0.0f) &&
+diff --git a/src/xenia/gpu/d3d12/d3d12_command_processor.h b/src/xenia/gpu/d3d12/d3d12_command_processor.h
+index 410587d..45a8ebd 100644
+--- a/src/xenia/gpu/d3d12/d3d12_command_processor.h
++++ b/src/xenia/gpu/d3d12/d3d12_command_processor.h
+@@ -611,6 +611,24 @@ class D3D12CommandProcessor : public CommandProcessor {
+   // gow2: draws in the open submission, for d3d12_submit_every_draws (0016).
+   uint32_t gow2_draws_in_submission_ = 0;
+ 
++  // gow2: registers of the XDK Clear remapped onto the depth owner's MSAA,
++  // restored as they were at the end of the draw (patch 0017).
++  class Gow2ClearRemap {
++   public:
++    explicit Gow2ClearRemap(RegisterFile& regs) : regs_(regs) {}
++    ~Gow2ClearRemap();
++    Gow2ClearRemap(const Gow2ClearRemap&) = delete;
++    Gow2ClearRemap& operator=(const Gow2ClearRemap&) = delete;
++    void Apply(xenos::MsaaSamples owner_msaa);
++    bool applied() const { return applied_; }
++
++   private:
++    RegisterFile& regs_;
++    std::pair<uint32_t, uint32_t> saved_[10];
++    uint32_t saved_count_ = 0;
++    bool applied_ = false;
++  };
++
+   // For awaiting non-submission queue operations such as UpdateTileMappings in
+   // AwaitAllQueueOperationsCompletion when they're queued after the latest
+   // ExecuteCommandLists + Signal, thus won't be awaited by just awaiting the
+diff --git a/src/xenia/gpu/render_target_cache.cc b/src/xenia/gpu/render_target_cache.cc
+index 025bfc7..2ad6470 100644
+--- a/src/xenia/gpu/render_target_cache.cc
++++ b/src/xenia/gpu/render_target_cache.cc
+@@ -21,6 +21,10 @@
+ #include "xenia/gpu/registers.h"
+ #include "xenia/gpu/xenos.h"
+ 
++// gow2: summary counters (runtime/gpu/shims/gow2_hooks.h), here the
++// draws' EDRAM transfers (patch 0017).
++#include "gow2_hooks.h"
++
+ DEFINE_bool(
+     debug_msaa_2x_as_4x, false,
+     "Use 4x MSAA with 2 samples instead of native 2x MSAA when available. "
+@@ -1188,6 +1192,16 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
+     return true;
+   }
+ 
++  // gow2: this draw's transfers counted in the summary (gpu_edram_transfers,
++  // patch 0017).
++  uint32_t gow2_transfer_count = 0;
++  for (const std::vector<Transfer>& transfers : last_update_transfers_) {
++    gow2_transfer_count += uint32_t(transfers.size());
++  }
++  if (gow2_transfer_count) {
++    gow2::hooks::OnEdramTransfers(gow2_transfer_count);
++  }
++
+   // If everything succeeded, update the used render targets.
+   for (uint32_t i = 0; i < 1 + xenos::kMaxColorRenderTargets; ++i) {
+     last_update_used_render_targets_[i] =
+@@ -2048,5 +2062,41 @@ void RenderTargetCache::ChangeOwnership(
+   }
+ }
+ 
++// gow2: patch 0017, see the declaration.
++bool RenderTargetCache::Gow2GetLowerMsaaDepthOwner(
++    xenos::MsaaSamples& owner_msaa_out) const {
++  if (GetPath() != Path::kHostRenderTargets) {
++    return false;
++  }
++  const RegisterFile& regs = register_file();
++  auto rb_surface_info = regs.Get<reg::RB_SURFACE_INFO>();
++  auto rb_depth_info = regs.Get<reg::RB_DEPTH_INFO>();
++  xenos::MsaaSamples msaa_samples = rb_surface_info.msaa_samples;
++  uint32_t pitch_tiles_at_32bpp =
++      ((rb_surface_info.surface_pitch
++        << uint32_t(msaa_samples >= xenos::MsaaSamples::k4X)) +
++       (xenos::kEdramTileWidthSamples - 1)) /
++      xenos::kEdramTileWidthSamples;
++  uint32_t base_tiles = rb_depth_info.depth_base;
++  auto it = ownership_ranges_.upper_bound(base_tiles);
++  if (it == ownership_ranges_.begin()) {
++    return false;
++  }
++  --it;
++  if (it->second.end_tiles <= base_tiles) {
++    return false;
++  }
++  RenderTargetKey owner = it->second.render_target;
++  if (owner.IsEmpty() || !owner.is_depth || owner.next_period ||
++      owner.base_tiles != base_tiles ||
++      owner.pitch_tiles_at_32bpp != pitch_tiles_at_32bpp ||
++      owner.resource_format != uint32_t(rb_depth_info.depth_format) ||
++      owner.msaa_samples >= msaa_samples) {
++    return false;
++  }
++  owner_msaa_out = owner.msaa_samples;
++  return true;
++}
++
+ }  // namespace gpu
+ }  // namespace xe
+diff --git a/src/xenia/gpu/render_target_cache.h b/src/xenia/gpu/render_target_cache.h
+index 32f8a5c..240d260 100644
+--- a/src/xenia/gpu/render_target_cache.h
++++ b/src/xenia/gpu/render_target_cache.h
+@@ -236,6 +236,12 @@ class RenderTargetCache {
+   uint32_t GetLastUpdateBoundRenderTargets(
+       uint32_t* depth_and_color_formats_out = nullptr) const;
+ 
++  // gow2: MSAA of the host depth render target that now owns the current
++  // draw's depth base, if it has the same tile pitch and the same format
++  // but fewer samples (patch 0017: XDK Clear at 4x remapped onto the
++  // owner).
++  bool Gow2GetLowerMsaaDepthOwner(xenos::MsaaSamples& owner_msaa_out) const;
++
+  protected:
+   RenderTargetCache(const RegisterFile& register_file, const Memory& memory,
+                     TraceWriter* trace_writer, uint32_t draw_resolution_scale_x,

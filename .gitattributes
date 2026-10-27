@@ -1,0 +1,7 @@
+# Submodule patches must be applied byte for byte: no CRLF conversion
+*.patch -text
+# Code vendored from Xenia: bytes identical to the origin commit (tools/vendor_xenia.py --check)
+thirdparty/xenia/** -text
+# Vendored FFmpeg subset: bytes identical to the fork's commit (tools/vendor_ffmpeg.py --check)
+thirdparty/ffmpeg/** -text
+graphify-out/graph.json merge=graphify

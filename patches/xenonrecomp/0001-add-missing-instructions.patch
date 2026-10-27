@@ -1,0 +1,274 @@
+diff --git a/XenonRecomp/recompiler.cpp b/XenonRecomp/recompiler.cpp
+index fa91527..531d719 100644
+--- a/XenonRecomp/recompiler.cpp
++++ b/XenonRecomp/recompiler.cpp
+@@ -668,6 +668,15 @@ bool Recompiler::Recompile(
+         println("\tif ({}.u32 != 0 && !{}.eq) goto loc_{:X};", ctr(), cr(insn.operands[0] / 4), insn.operands[1]);
+         break;
+ 
++    case PPC_INST_BDNZT:
++        // Semantics cross-checked against Xenia (src/xenia/cpu/ppc/ppc_emit_control.cc, InstrEmit_bcx):
++        // decrement CTR, branch if CTR != 0 and CR bit BI is set. See ppc_bdnzt.
++        {
++            static constexpr const char* crBits[] = { "lt", "gt", "eq", "so" };
++            println("\tif (ppc_bdnzt({}, {}.{})) goto loc_{:X};", ctr(), cr(insn.operands[0] / 4), crBits[insn.operands[0] % 4], insn.operands[1]);
++        }
++        break;
++
+     case PPC_INST_BEQ:
+         printConditionalBranch(false, "eq");
+         break;
+@@ -804,6 +813,11 @@ bool Recompiler::Recompile(
+         // no op
+         break;
+ 
++    case PPC_INST_DCBST:
++        // no op: data cache block store has no visible effect here
++        // (semantics cross-checked against Xenia: src/xenia/cpu/ppc/ppc_emit_memory.cc, InstrEmit_dcbst, CacheControl only)
++        break;
++
+     case PPC_INST_DCBT:
+         // no op
+         break;
+@@ -852,6 +866,12 @@ bool Recompiler::Recompile(
+         // no op
+         break;
+ 
++    case PPC_INST_EQV:
++        // Semantics cross-checked against Xenia (src/xenia/cpu/ppc/ppc_emit_alu.cc, InstrEmit_eqvx): rA = ~(rS ^ rB). See ppc_eqv.
++        // The record form (eqv.) is left unhandled on purpose: the RC-bit check reports it.
++        println("\t{}.u64 = ppc_eqv({}.u64, {}.u64);", r(insn.operands[0]), r(insn.operands[1]), r(insn.operands[2]));
++        break;
++
+     case PPC_INST_EXTSB:
+         println("\t{}.s64 = {}.s8;", r(insn.operands[0]), r(insn.operands[1]));
+         if (strchr(insn.opcode->name, '.'))
+@@ -990,6 +1010,12 @@ bool Recompiler::Recompile(
+         println("\t{}.f64 = double(float({}.f64));", f(insn.operands[0]), f(insn.operands[1]));
+         break;
+ 
++    case PPC_INST_FRSQRTE:
++        // Semantics cross-checked against Xenia (src/xenia/cpu/ppc/ppc_emit_fpu.cc, InstrEmit_frsqrtex): 1/sqrt(frB). See ppc_frsqrte.
++        printSetFlushMode(false);
++        println("\t{}.f64 = ppc_frsqrte({}.f64);", f(insn.operands[0]), f(insn.operands[1]));
++        break;
++
+     case PPC_INST_FSEL:
+         printSetFlushMode(false);
+         println("\t{}.f64 = {}.f64 >= 0.0 ? {}.f64 : {}.f64;", f(insn.operands[0]), f(insn.operands[1]), f(insn.operands[2]), f(insn.operands[3]));
+@@ -1301,6 +1327,11 @@ bool Recompiler::Recompile(
+         println("\t{}.ca = ({}.u64 & 0x20000000) != 0;", xer(), r(insn.operands[0]));
+         break;
+ 
++    case PPC_INST_MULHD:
++        // Semantics cross-checked against Xenia (src/xenia/cpu/ppc/ppc_emit_alu.cc, InstrEmit_mulhdx): signed 128-bit product, high half. See ppc_mulhd.
++        println("\t{}.s64 = ppc_mulhd({}.s64, {}.s64);", r(insn.operands[0]), r(insn.operands[1]), r(insn.operands[2]));
++        break;
++
+     case PPC_INST_MULHW:
+         println("\t{}.s64 = (int64_t({}.s32) * int64_t({}.s32)) >> 32;", r(insn.operands[0]), r(insn.operands[1]), r(insn.operands[2]));
+         break;
+@@ -1795,6 +1826,14 @@ bool Recompiler::Recompile(
+             println("simde_mm_load_ps({}.f32)));", v(insn.operands[1]));
+         break;
+ 
++    case PPC_INST_VCTUXS:
++    case PPC_INST_VCFPUXWS128:
++        // Semantics cross-checked against Xenia (src/xenia/cpu/ppc/ppc_emit_altivec.cc, InstrEmit_vctuxs_): float * 2^UIMM -> uint32,
++        // unsigned saturation, NaN -> 0. See ppc_vctuxs.
++        printSetFlushMode(true);
++        println("\tppc_vctuxs({}, {}, {});", v(insn.operands[0]), v(insn.operands[1]), insn.operands[2]);
++        break;
++
+     case PPC_INST_VCFSX:
+     case PPC_INST_VCSXWFP128:
+     {
+@@ -1966,6 +2005,12 @@ bool Recompiler::Recompile(
+         println("\tsimde_mm_store_ps({}.f32, simde_mm_xor_ps(simde_mm_sub_ps(simde_mm_mul_ps(simde_mm_load_ps({}.f32), simde_mm_load_ps({}.f32)), simde_mm_load_ps({}.f32)), simde_mm_castsi128_ps(simde_mm_set1_epi32(int(0x80000000)))));", v(insn.operands[0]), v(insn.operands[1]), v(insn.operands[2]), v(insn.operands[3]));
+         break;
+ 
++    case PPC_INST_VNOR:
++    case PPC_INST_VNOR128:
++        // Semantics cross-checked against Xenia (src/xenia/cpu/ppc/ppc_emit_altivec.cc, InstrEmit_vnor_): vD = ~(vA | vB). See ppc_vnor.
++        println("\tppc_vnor({}, {}, {});", v(insn.operands[0]), v(insn.operands[1]), v(insn.operands[2]));
++        break;
++
+     case PPC_INST_VOR:
+     case PPC_INST_VOR128:
+         print("\tsimde_mm_store_si128((simde__m128i*){}.u8, ", v(insn.operands[0]));
+@@ -2042,6 +2087,27 @@ bool Recompiler::Recompile(
+         }
+         break;
+ 
++    case PPC_INST_VPKSWSS:
++    case PPC_INST_VPKSWSS128:
++        // Semantics cross-checked against Xenia (src/xenia/cpu/ppc/ppc_emit_altivec.cc, InstrEmit_vpkswss_): signed words -> signed
++        // saturated halfwords, guest result vA | vB. See ppc_vpkswss.
++        println("\tppc_vpkswss({}, {}, {});", v(insn.operands[0]), v(insn.operands[1]), v(insn.operands[2]));
++        break;
++
++    case PPC_INST_VPKUHUS:
++    case PPC_INST_VPKUHUS128:
++        // Semantics cross-checked against Xenia (src/xenia/cpu/ppc/ppc_emit_altivec.cc, InstrEmit_vpkuhus_): unsigned halfwords ->
++        // unsigned saturated bytes, guest result vA | vB. See ppc_vpkuhus.
++        println("\tppc_vpkuhus({}, {}, {});", v(insn.operands[0]), v(insn.operands[1]), v(insn.operands[2]));
++        break;
++
++    case PPC_INST_VPKUWUS:
++    case PPC_INST_VPKUWUS128:
++        // Semantics cross-checked against Xenia (src/xenia/cpu/ppc/ppc_emit_altivec.cc, InstrEmit_vpkuwus_): unsigned words ->
++        // unsigned saturated halfwords, guest result vA | vB. See ppc_vpkuwus.
++        println("\tppc_vpkuwus({}, {}, {});", v(insn.operands[0]), v(insn.operands[1]), v(insn.operands[2]));
++        break;
++
+     case PPC_INST_VPKSHUS:
+     case PPC_INST_VPKSHUS128:
+         println("\tsimde_mm_store_si128((simde__m128i*){}.u8, simde_mm_packus_epi16(simde_mm_load_si128((simde__m128i*){}.s16), simde_mm_load_si128((simde__m128i*){}.s16)));", v(insn.operands[0]), v(insn.operands[2]), v(insn.operands[1]));
+@@ -2091,6 +2157,12 @@ bool Recompiler::Recompile(
+         println("\tsimde_mm_store_si128((simde__m128i*){}.u8, simde_mm_or_si128(simde_mm_andnot_si128(simde_mm_load_si128((simde__m128i*){}.u8), simde_mm_load_si128((simde__m128i*){}.u8)), simde_mm_and_si128(simde_mm_load_si128((simde__m128i*){}.u8), simde_mm_load_si128((simde__m128i*){}.u8))));", v(insn.operands[0]), v(insn.operands[3]), v(insn.operands[1]), v(insn.operands[3]), v(insn.operands[2]));
+         break;
+ 
++    case PPC_INST_VSEL128:
++        // Semantics cross-checked against Xenia (src/xenia/cpu/ppc/ppc_emit_altivec.cc, InstrEmit_vsel128): like vsel with vD as the
++        // selector (operands[3] is VS128, the same field as VD128). See ppc_vsel.
++        println("\tppc_vsel({}, {}, {}, {});", v(insn.operands[0]), v(insn.operands[1]), v(insn.operands[2]), v(insn.operands[3]));
++        break;
++
+     case PPC_INST_VSLB:
+         // TODO: vectorize
+         for (size_t i = 0; i < 16; i++)
+diff --git a/XenonUtils/ppc_context.h b/XenonUtils/ppc_context.h
+index 31a86cd..c6b6faa 100644
+--- a/XenonUtils/ppc_context.h
++++ b/XenonUtils/ppc_context.h
+@@ -688,6 +688,130 @@ inline simde__m128i simde_mm_vsr(simde__m128i a, simde__m128i b)
+     return simde_mm_castps_si128(simde_mm_insert_ps(simde_mm_castsi128_ps(simde_mm_srl_epi64(a, b)), simde_mm_castsi128_ps(simde_mm_srl_epi64(simde_mm_srli_si128(a, 4), b)), 0x10));
+ }
+ 
++// ---------------------------------------------------------------------------
++// Helpers for instructions that upstream XenonRecomp does not translate.
++// The emitted code calls these, so their semantics can be unit-tested.
++//
++// Vector registers are kept byte-reversed with respect to the guest (lvx
++// loads through VectorMaskL): guest word i is host u32[3 - i], guest halfword
++// i is host u16[7 - i], guest byte i is host u8[15 - i]. Packs therefore put
++// vB in the low (host) half and vA in the high half, as PPC_INST_VPKSHUS does.
++// Every helper reads all its inputs before writing the destination, so the
++// destination may alias any source. VSCR[SAT] is not modelled by XenonRecomp
++// and is not updated here either.
++// ---------------------------------------------------------------------------
++
++// eqv rA,rS,rB: rA = ~(rS ^ rB).
++// Xenia: src/xenia/cpu/ppc/ppc_emit_alu.cc, InstrEmit_eqvx.
++inline uint64_t ppc_eqv(uint64_t s, uint64_t b) noexcept
++{
++    return ~(s ^ b);
++}
++
++// mulhd rT,rA,rB: high 64 bits of the signed 128-bit product.
++// Xenia: src/xenia/cpu/ppc/ppc_emit_alu.cc, InstrEmit_mulhdx (MulHi, signed).
++inline int64_t ppc_mulhd(int64_t a, int64_t b) noexcept
++{
++    return int64_t((__int128(a) * __int128(b)) >> 64);
++}
++
++// frsqrte frD,frB: reciprocal square root estimate; the exact value is used
++// (within the hardware estimate's tolerance). -0 -> -inf, +0 -> +inf,
++// negative -> NaN, +inf -> +0, NaN -> NaN, as 1/sqrt does.
++// Xenia: src/xenia/cpu/ppc/ppc_emit_fpu.cc, InstrEmit_frsqrtex (RSqrt).
++inline double ppc_frsqrte(double b) noexcept
++{
++    return 1.0 / sqrt(b);
++}
++
++// bdnz[t] BI,target: CTR <- CTR - 1; taken if CTR[32:63] != 0 and the CR bit
++// is set. The CR bit test is passed in by the caller.
++// Xenia: src/xenia/cpu/ppc/ppc_emit_control.cc, InstrEmit_bcx (BO = 01000).
++inline bool ppc_bdnzt(PPCRegister& ctr, bool crBit) noexcept
++{
++    --ctr.u64;
++    return ctr.u32 != 0 && crBit;
++}
++
++// vnor128 vD,vA,vB: vD = ~(vA | vB).
++// Xenia: src/xenia/cpu/ppc/ppc_emit_altivec.cc, InstrEmit_vnor_ / vnor128.
++inline void ppc_vnor(PPCVRegister& d, const PPCVRegister& a, const PPCVRegister& b) noexcept
++{
++    simde__m128i va = simde_mm_load_si128((const simde__m128i*)a.u8);
++    simde__m128i vb = simde_mm_load_si128((const simde__m128i*)b.u8);
++    simde__m128i r = simde_mm_xor_si128(simde_mm_or_si128(va, vb), simde_mm_set1_epi32(-1));
++    simde_mm_store_si128((simde__m128i*)d.u8, r);
++}
++
++// vsel vD,vA,vB,vC: each bit = vC ? vB : vA. vsel128 uses vD itself as vC.
++// Xenia: src/xenia/cpu/ppc/ppc_emit_altivec.cc, InstrEmit_vsel_ / vsel128
++// (vc = VX128_VD128).
++inline void ppc_vsel(PPCVRegister& d, const PPCVRegister& a, const PPCVRegister& b, const PPCVRegister& c) noexcept
++{
++    simde__m128i va = simde_mm_load_si128((const simde__m128i*)a.u8);
++    simde__m128i vb = simde_mm_load_si128((const simde__m128i*)b.u8);
++    simde__m128i vc = simde_mm_load_si128((const simde__m128i*)c.u8);
++    simde__m128i r = simde_mm_or_si128(simde_mm_andnot_si128(vc, va), simde_mm_and_si128(vc, vb));
++    simde_mm_store_si128((simde__m128i*)d.u8, r);
++}
++
++// vpkuwus128 vD,vA,vB: unsigned words -> unsigned halfwords, saturating to
++// 0xFFFF; guest result = vA[0..3] | vB[0..3].
++// Xenia: src/xenia/cpu/ppc/ppc_emit_altivec.cc, InstrEmit_vpkuwus_
++// (PACK_TYPE_16_IN_32 | IN_UNSIGNED | OUT_UNSIGNED | OUT_SATURATE).
++inline void ppc_vpkuwus(PPCVRegister& d, const PPCVRegister& a, const PPCVRegister& b) noexcept
++{
++    simde__m128i limit = simde_mm_set1_epi32(0xFFFF);
++    simde__m128i va = simde_mm_min_epu32(simde_mm_load_si128((const simde__m128i*)a.u32), limit);
++    simde__m128i vb = simde_mm_min_epu32(simde_mm_load_si128((const simde__m128i*)b.u32), limit);
++    simde_mm_store_si128((simde__m128i*)d.u16, simde_mm_packus_epi32(vb, va));
++}
++
++// vpkuhus128 vD,vA,vB: unsigned halfwords -> unsigned bytes, saturating to
++// 0xFF; guest result = vA[0..7] | vB[0..7].
++// Xenia: src/xenia/cpu/ppc/ppc_emit_altivec.cc, InstrEmit_vpkuhus_
++// (PACK_TYPE_8_IN_16 | IN_UNSIGNED | OUT_UNSIGNED | OUT_SATURATE).
++inline void ppc_vpkuhus(PPCVRegister& d, const PPCVRegister& a, const PPCVRegister& b) noexcept
++{
++    simde__m128i limit = simde_mm_set1_epi16(0xFF);
++    simde__m128i va = simde_mm_min_epu16(simde_mm_load_si128((const simde__m128i*)a.u16), limit);
++    simde__m128i vb = simde_mm_min_epu16(simde_mm_load_si128((const simde__m128i*)b.u16), limit);
++    simde_mm_store_si128((simde__m128i*)d.u8, simde_mm_packus_epi16(vb, va));
++}
++
++// vpkswss128 vD,vA,vB: signed words -> signed halfwords, saturating to
++// [-32768, 32767]; guest result = vA[0..3] | vB[0..3].
++// Xenia: src/xenia/cpu/ppc/ppc_emit_altivec.cc, InstrEmit_vpkswss_
++// (PACK_TYPE_16_IN_32 | IN_SIGNED | OUT_SIGNED | OUT_SATURATE).
++inline void ppc_vpkswss(PPCVRegister& d, const PPCVRegister& a, const PPCVRegister& b) noexcept
++{
++    simde__m128i va = simde_mm_load_si128((const simde__m128i*)a.s32);
++    simde__m128i vb = simde_mm_load_si128((const simde__m128i*)b.s32);
++    simde_mm_store_si128((simde__m128i*)d.s16, simde_mm_packs_epi32(vb, va));
++}
++
++// vcfpuxws128 vD,vB,UIMM (= vctuxs): each float * 2^UIMM converted to uint32
++// with truncation and unsigned saturation: NaN -> 0, <= 0 -> 0,
++// >= 2^32 (and +inf) -> 0xFFFFFFFF.
++// Xenia: src/xenia/cpu/ppc/ppc_emit_altivec.cc, InstrEmit_vctuxs_ /
++// vcfpuxws128 (Mul by exp2(uimm), VectorConvertF2I ARITHMETIC_UNSIGNED).
++inline void ppc_vctuxs(PPCVRegister& d, const PPCVRegister& b, uint32_t uimm) noexcept
++{
++    const float scale = float(1ull << (uimm & 31));
++    uint32_t r[4];
++    for (int i = 0; i < 4; i++)
++    {
++        const float x = b.f32[i] * scale;
++        if (!(x > 0.0f))              // NaN, zero, negative
++            r[i] = 0;
++        else if (x >= 4294967296.0f)  // 2^32 and +inf
++            r[i] = 0xFFFFFFFFu;
++        else
++            r[i] = uint32_t(x);
++    }
++    memcpy(d.u32, r, sizeof(r));
++}
++
+ #if defined(__aarch64__) || defined(_M_ARM64)
+ inline uint64_t __rdtsc()
+ {

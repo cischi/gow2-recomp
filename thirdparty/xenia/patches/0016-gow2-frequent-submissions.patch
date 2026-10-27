@@ -1,0 +1,59 @@
+diff --git a/src/xenia/gpu/d3d12/d3d12_command_processor.cc b/src/xenia/gpu/d3d12/d3d12_command_processor.cc
+index 012d087..dac8cab 100644
+--- a/src/xenia/gpu/d3d12/d3d12_command_processor.cc
++++ b/src/xenia/gpu/d3d12/d3d12_command_processor.cc
+@@ -41,6 +41,14 @@ DEFINE_bool(d3d12_submit_on_primary_buffer_end, true,
+             "Submit the command list when a PM4 primary buffer ends if it's "
+             "possible to submit immediately to try to reduce frame latency.",
+             "D3D12");
++// gow2: with strict occlusion queries the game waits for a result every
++// frame; closing the submission every N draws starts the GPU earlier and
++// shortens the wait (patch 0016).
++DEFINE_uint32(d3d12_submit_every_draws, 0,
++              "Submit the command list after this many draws if it's possible "
++              "to submit immediately, so the GPU starts earlier (0 = only at "
++              "primary buffer ends and swaps).",
++              "D3D12");
+ 
+ DECLARE_bool(clear_memory_page_state);
+ DECLARE_bool(readback_resolve_half_pixel_offset);
+@@ -3343,6 +3351,18 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
+     }
+   }
+ 
++  // gow2: submission closed every N draws (patch 0016), only at scale 1: at
++  // 2x/3x the GPU is already full (no extra fps) and splitting ZPD reports
++  // across submissions brings back blue armor (6/18 frames at 3x, 4 of 4 runs).
++  // shortcut: the cause in the counts at scale > 1 is not found; if it is,
++  // remove the scale check.
++  if (cvars::d3d12_submit_every_draws &&
++      ++gow2_draws_in_submission_ >= cvars::d3d12_submit_every_draws &&
++      texture_cache_->draw_resolution_scale_x() == 1 &&
++      texture_cache_->draw_resolution_scale_y() == 1 &&
++      CanEndSubmissionImmediately()) {
++    EndSubmission(false);
++  }
+   return true;
+ }
+ 
+@@ -4012,6 +4032,7 @@ bool D3D12CommandProcessor::EndSubmission(bool is_swap) {
+     completion_timeline_->SignalAndAdvance(direct_queue);
+ 
+     submission_open_ = false;
++    gow2_draws_in_submission_ = 0;  // gow2: patch 0016
+ 
+     // Pump ZPD query process. This drains any resolves that became readable
+     // from completed work and retires reports unblocked by those resolves.
+diff --git a/src/xenia/gpu/d3d12/d3d12_command_processor.h b/src/xenia/gpu/d3d12/d3d12_command_processor.h
+index a7cde15..410587d 100644
+--- a/src/xenia/gpu/d3d12/d3d12_command_processor.h
++++ b/src/xenia/gpu/d3d12/d3d12_command_processor.h
+@@ -608,6 +608,8 @@ class D3D12CommandProcessor : public CommandProcessor {
+ 
+   std::unique_ptr<ui::d3d12::D3D12GPUCompletionTimeline> completion_timeline_;
+   bool submission_open_ = false;
++  // gow2: draws in the open submission, for d3d12_submit_every_draws (0016).
++  uint32_t gow2_draws_in_submission_ = 0;
+ 
+   // For awaiting non-submission queue operations such as UpdateTileMappings in
+   // AwaitAllQueueOperationsCompletion when they're queued after the latest

@@ -1,0 +1,78 @@
+diff --git a/src/xenia/apu/xma_context_new.cc b/src/xenia/apu/xma_context_new.cc
+index 9c7e702..86379ab 100644
+--- a/src/xenia/apu/xma_context_new.cc
++++ b/src/xenia/apu/xma_context_new.cc
+@@ -8,6 +8,8 @@
+ */
+ 
+ #include "xenia/apu/xma_context_new.h"
++// gow2: summary counters (runtime/apu/shims/gow2_apu_hooks.h).
++#include "gow2_apu_hooks.h"
+ #include "xenia/apu/xma_helpers.h"
+ 
+ #include "xenia/base/logging.h"
+@@ -960,6 +962,8 @@ bool XmaContextNew::DecodePacket(AVCodecContext* av_context,
+     av_strerror(ret, errbuf, sizeof(errbuf));
+     XELOGE("XmaContext {}: Error sending packet for decoding: {} ({})", id(),
+            errbuf, ret);
++    // gow2: error counted in the summary (xma_decode_errors) and in the log.
++    gow2::hooks::OnXmaDecodeError(id());
+     return false;
+   }
+   ret = avcodec_receive_frame(av_context, av_frame);
+@@ -972,8 +976,12 @@ bool XmaContextNew::DecodePacket(AVCodecContext* av_context,
+     char errbuf[AV_ERROR_MAX_STRING_SIZE];
+     av_strerror(ret, errbuf, sizeof(errbuf));
+     XELOGE("XmaContext {}: Error during decoding: {} ({})", id(), errbuf, ret);
++    // gow2: error counted in the summary (xma_decode_errors) and in the log.
++    gow2::hooks::OnXmaDecodeError(id());
+     return false;
+   }
++  // gow2: decoded frame counted in the summary (xma_frames_decoded); EAGAIN above does not count.
++  gow2::hooks::OnXmaFrameDecoded();
+   return true;
+ }
+ 
+diff --git a/src/xenia/apu/xma_context_old.cc b/src/xenia/apu/xma_context_old.cc
+index e940810..aac9090 100644
+--- a/src/xenia/apu/xma_context_old.cc
++++ b/src/xenia/apu/xma_context_old.cc
+@@ -18,6 +18,8 @@
+ #include "xenia/base/platform.h"
+ #include "xenia/base/profiling.h"
+ #include "xenia/base/ring_buffer.h"
++// gow2: summary counters (runtime/apu/shims/gow2_apu_hooks.h).
++#include "gow2_apu_hooks.h"
+ 
+ extern "C" {
+ #if XE_COMPILER_MSVC
+@@ -619,8 +621,12 @@ void XmaContextOld::Decode(XMA_CONTEXT_DATA* data) {
+     split_frame_padding_start_ = 0;
+ 
+     auto ret = avcodec_send_packet(av_context_, av_packet_);
++    // gow2: one error per packet even if both send and receive fail.
++    const bool gow2_send_failed = ret < 0;
+     if (ret < 0) {
+       XELOGE("XmaContext {}: Error - Sending packet for decoding failed", id());
++      // gow2: error counted in the summary (xma_decode_errors) and in the log.
++      gow2::hooks::OnXmaDecodeError(id());
+       // TODO bail out
+       assert_always();
+     }
+@@ -633,11 +639,16 @@ void XmaContextOld::Decode(XMA_CONTEXT_DATA* data) {
+       av_strerror(ret, errbuf, sizeof(errbuf));
+       XELOGE("XmaContext {}: Error - Decoding failed: {} ({})", id(), errbuf,
+              ret);
++      // gow2: error counted in the summary (xma_decode_errors) and in the log, if
++      // the send has not already counted it.
++      if (!gow2_send_failed) gow2::hooks::OnXmaDecodeError(id());
+       data->parser_error_status = 4;
+       SwapInputBuffer(data);
+       return;
+     }
+     assert_true(ret == 0);
++    // gow2: decoded frame counted in the summary (xma_frames_decoded).
++    gow2::hooks::OnXmaFrameDecoded();
+ 
+     {
+       // copy over 1 frame

@@ -1,0 +1,27 @@
+# Copyrighted material: never in the repo
+Gears of War 2 \[360\]/
+*.iso
+*.xex
+game_data/
+# Saves and caches written by the runtime
+user_data/
+# Build output and code generated from the user's game
+build/
+out/
+.claude/settings.local.json
+__pycache__/
+gow2.log
+*.log
+*.bmp
+shader_dumps/
+.clangd
+graphify-out/
+# Plan work (ledger, briefs): local, never versioned
+.superpowers/
+# Local development files: never in the public repository
+docs/superpowers/
+CLAUDE.md
+.graphifyignore
+.claude/
+.pytest_cache/
+dist/

@@ -1,0 +1,74 @@
+diff --git a/src/xenia/gpu/draw_util.cc b/src/xenia/gpu/draw_util.cc
+index b5a39a8..ffdfb87 100644
+--- a/src/xenia/gpu/draw_util.cc
++++ b/src/xenia/gpu/draw_util.cc
+@@ -27,6 +27,14 @@ DEFINE_bool(
+     "resolve areas to eliminate the gap caused by the half-pixel offset (this "
+     "is necessary for certain games to display the scene graphics).",
+     "GPU");
++// gow2: patch 0018, half-pixel fill for depth too.
++DEFINE_bool(
++    gow2_resolve_fill_depth, true,
++    "Apply resolve_resolution_scale_fill_half_pixel_offset to depth resolves "
++    "too. Gears of War 2 resolves the scene depth in two bands (rows 0-511 and "
++    "512-719): filling the first host row of the second band leaves a dark "
++    "line on the characters at row 512.",
++    "GPU");
+ 
+ DEFINE_bool(
+     depth_bias_shader_offset, false,
+@@ -1262,6 +1270,19 @@ constexpr ResolveCopyShaderInfo
+         {"Resolve Copy DXT3A as 1_1_1_1", 8, 3},
+ };
+ XE_MSVC_OPTIMIZE_SMALL()
++// gow2: patch 0018.
++bool ResolveFillHalfPixelOffset(const RegisterFile& regs,
++                                uint32_t draw_resolution_scale_x,
++                                uint32_t draw_resolution_scale_y,
++                                bool is_depth) {
++  return (draw_resolution_scale_x > 1 || draw_resolution_scale_y > 1) &&
++         cvars::resolve_resolution_scale_fill_half_pixel_offset &&
++         (!is_depth || cvars::gow2_resolve_fill_depth) &&
++         cvars::half_pixel_offset &&
++         regs.Get<reg::PA_SU_VTX_CNTL>().pix_center ==
++             xenos::PixelCenter::kD3DZero;
++}
++
+ bool GetResolveInfo(const RegisterFile& regs, const Memory& memory,
+                     TraceWriter& trace_writer, uint32_t draw_resolution_scale_x,
+                     uint32_t draw_resolution_scale_y,
+@@ -1643,12 +1664,10 @@ bool GetResolveInfo(const RegisterFile& regs, const Memory& memory,
+       base_offset_y_tiles * surface_pitch_tiles + base_offset_x_tiles;
+ 
+   // Write the color/depth EDRAM info.
+-  bool fill_half_pixel_offset =
+-      (draw_resolution_scale_x > 1 || draw_resolution_scale_y > 1) &&
+-      cvars::resolve_resolution_scale_fill_half_pixel_offset &&
+-      cvars::half_pixel_offset &&
+-      regs.Get<reg::PA_SU_VTX_CNTL>().pix_center ==
+-          xenos::PixelCenter::kD3DZero;
++  // gow2: patch 0018, decision in ResolveFillHalfPixelOffset (also for
++  // depth, gow2_resolve_fill_depth).
++  bool fill_half_pixel_offset = ResolveFillHalfPixelOffset(
++      regs, draw_resolution_scale_x, draw_resolution_scale_y, is_depth);
+   int32_t exp_bias = is_depth ? 0 : rb_copy_dest_info.copy_dest_exp_bias;
+   ResolveEdramInfo depth_edram_info;
+   depth_edram_info.packed = 0;
+diff --git a/src/xenia/gpu/draw_util.h b/src/xenia/gpu/draw_util.h
+index d8c70c5..d905a37 100644
+--- a/src/xenia/gpu/draw_util.h
++++ b/src/xenia/gpu/draw_util.h
+@@ -878,6 +878,13 @@ struct ResolveInfo {
+ // color render target formats are properly emulated as -32...32, true if
+ // emulated as snorm, with range limited to -1...1, but with correct blending
+ // within that range.
++// gow2: patch 0018. Whether to fill the half-pixel hole at the left and top
++// of a scaled resolve; for depth only with gow2_resolve_fill_depth.
++bool ResolveFillHalfPixelOffset(const RegisterFile& regs,
++                                uint32_t draw_resolution_scale_x,
++                                uint32_t draw_resolution_scale_y,
++                                bool is_depth);
++
+ bool GetResolveInfo(const RegisterFile& regs, const Memory& memory,
+                     TraceWriter& trace_writer, uint32_t draw_resolution_scale_x,
+                     uint32_t draw_resolution_scale_y,

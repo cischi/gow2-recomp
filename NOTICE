@@ -1,0 +1,249 @@
+gow2-recomp - Gears of War 2 PC port (static recompilation)
+
+This program is free software distributed under the terms of the GNU
+General Public License, version 3 (see LICENSE). The repository contains no
+game material (ISO, XEX, assets, recompiled code).
+
+It contains code derived from or adapted from the projects listed below.
+Every copied or adapted file states in its header the origin project, the
+original path, the reference commit and the license. THIRD_PARTY_NOTICES.md
+lists every third-party component, including the ones only used at runtime
+or at build time.
+
+==============================================================================
+Unleashed Recomp
+https://github.com/hedge-dev/UnleashedRecomp
+Reference commit: cf829a9eca8fb680fba4b0409ddeb6ca92f22e3c
+Copyright (c) hedge-dev and contributors
+License: GNU General Public License v3.0 (same text as LICENSE)
+
+Derived files:
+  runtime/kernel/function.h   from UnleashedRecomp/kernel/function.h
+
+Files that follow its semantics or design (cited in the header):
+  runtime/kernel/memory.cpp   Rtl*Heap from UnleashedRecomp/kernel/heap.cpp
+                              (rewritten on o1heap 3.x)
+  runtime/kernel/threads.cpp  per-thread PPCContext and startup with r1/r13
+                              from UnleashedRecomp/cpu/guest_thread.cpp
+  runtime/kernel/objects.cpp  guest address -> object map from
+                              UnleashedRecomp/kernel/xdm.h (QueryKernelObject)
+
+==============================================================================
+Xenia
+https://github.com/xenia-project/xenia
+Reference commit: 95a5c3ee250f80c3b9d139658649d9ffb6db3eec
+Copyright (c) 2015, Ben Vanik and contributors
+License: BSD-3-Clause
+
+Copied files:
+  runtime/kernel/nt_status_table.inc   NT status -> Win32 error tables
+                                       copied from
+                                       src/xenia/kernel/xboxkrnl/xboxkrnl_error.cc
+                                       (Copyright 2022 Ben Vanik; only change:
+                                       xe::countof -> std::size)
+
+Vendored GPU code: thirdparty/xenia/ contains files of xenia-canary
+(https://github.com/xenia-canary/xenia-canary, commit
+e6cd2e4bc998609ca25e24a24c8e32b66c5908ad) copied without manual changes by
+the tools/vendor_xenia.py script, with the original headers intact; the only
+changes are the patches in thirdparty/xenia/patches/ (every hunk marked
+"gow2:"). List of the files, of the patches with their reason and of the
+shims in thirdparty/xenia/VENDORED.md; license in thirdparty/xenia/LICENSE
+(same text as below). The shims in runtime/gpu/shims/ reproduce Xenia
+interfaces (include paths, names, signatures) with implementations of this
+project and cite in their header the Xenia file they replace. The presenter
+(runtime/gpu/presenter.cpp) uses two precompiled DXBC shaders of Xenia, also
+in thirdparty/xenia/
+(src/xenia/ui/shaders/bytecode/d3d12_5_1/guest_output_bilinear_ps.h and
+guest_output_triangle_strip_rect_vs.h), under the same license; the two
+sharpening shaders (guest_output_ffx_cas_sharpen_ps.h,
+guest_output_ffx_cas_resample_ps.h) derive from AMD FidelityFX CAS
+(Copyright (c) Advanced Micro Devices, Inc., MIT license). The APU (XMA
+decoding: src/xenia/apu/xma_context*, xma_register_*, base/bit_stream) is
+also in thirdparty/xenia/, at the same xenia-canary commit, with patches 0007
+and 0008.
+
+Also used as the reference for the semantics of the Xbox 360 kernel
+functions; the adapted parts cite in a comment the reference Xenia function
+(src/xenia/kernel/xboxkrnl/*.cc, src/xenia/kernel/xam/*.cc, xthread.cc,
+xobject.cc, util/object_table.cc; for the fake GPU in runtime/gpu_fake/:
+src/xenia/gpu/graphics_system.cc, command_processor.cc, xenos.h). Files with
+these references: runtime/kernel/*.cpp, runtime/kernel/io/*.cpp,
+runtime/gpu_fake/*.cpp.
+
+  Copyright (c) 2015, Ben Vanik.
+  All rights reserved.
+
+  Redistribution and use in source and binary forms, with or without
+  modification, are permitted provided that the following conditions are met:
+      * Redistributions of source code must retain the above copyright
+        notice, this list of conditions and the following disclaimer.
+      * Redistributions in binary form must reproduce the above copyright
+        notice, this list of conditions and the following disclaimer in the
+        documentation and/or other materials provided with the distribution.
+      * Neither the name of the project nor the
+        names of its contributors may be used to endorse or promote products
+        derived from this software without specific prior written permission.
+
+  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+  ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+  WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+  DISCLAIMED. IN NO EVENT SHALL BEN VANIK BE LIABLE FOR ANY
+  DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+  (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+  LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+  ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+  (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+  SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+==============================================================================
+DXBCChecksum (in thirdparty/xenia/third_party/dxbc/, vendored with Xenia)
+Copyright 2008-2016 (c), Advanced Micro Devices, Inc. All rights reserved.
+(AMD Developer Tools Team); modified by Xenia (Windows.h removed)
+"Free for all" MD5 implementation (style modified by Tony Ray, 2001, and
+Dominik Reichl, 2002), derived from the RSA Data Security, Inc. MD5 Message
+Digest Algorithm (Copyright (C) 1990, RSA Data Security, Inc.). The complete
+license notes are in the header of DXBCChecksum.h and DXBCChecksum.cpp.
+
+==============================================================================
+DirectXShaderCompiler (https://github.com/microsoft/DirectXShaderCompiler,
+University of Illinois/NCSA Open Source License): the shim
+runtime/gpu/shims/third_party/DirectXShaderCompiler/projects/dxilconv/include/DxbcConverter.h
+repeats only the declaration of the IDxbcConverter interface and of
+CLSID_DxbcConverter from projects/dxilconv/include/DxbcConverter.h (no
+implementation; dxilconv.dll is never loaded).
+
+Copyright (c) Microsoft Corporation. All rights reserved.
+
+University of Illinois/NCSA Open Source License
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal with
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+  * Redistributions of source code must retain the above copyright notice,
+    this list of conditions and the following disclaimers.
+  * Redistributions in binary form must reproduce the above copyright notice,
+    this list of conditions and the following disclaimers in the documentation
+    and/or other materials provided with the distribution.
+  * Neither the names of the LLVM Team, University of Illinois at
+    Urbana-Champaign, nor the names of its contributors may be used to endorse
+    or promote products derived from this Software without specific prior
+    written permission.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+CONTRIBUTORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS WITH THE
+SOFTWARE.
+
+==============================================================================
+FFmpeg (fork used by xenia-canary)
+https://github.com/has207/FFmpeg (xmaframes branch)
+Reference commit: d980192e175e6ff95bcd287af77e16fcb6597974
+Configuration (config.h, component lists): third_party/ffmpeg-xenia of
+https://github.com/xenia-canary/xenia-canary @e6cd2e4bc998609ca25e24a24c8e32b66c5908ad
+Copyright (c) the FFmpeg developers
+License: GNU Lesser General Public License v2.1 or later (LGPL-2.1-or-later)
+
+Subset of libavcodec and libavutil with the xenia-canary decoders
+(xmaframes, the only one used, plus mp3 and wma), vendored in
+thirdparty/ffmpeg/ by the tools/vendor_ffmpeg.py script with the original
+headers intact; compiled into the xenia_ffmpeg static library and
+incorporated into this project's GPL-3.0 binary under section 3 of the
+LGPL-2.1 (the LGPL allows applying the terms of the GPL to the files). The
+complete source of the subset is in thirdparty/ffmpeg/; license text in
+thirdparty/ffmpeg/COPYING.LGPLv2.1, project note in
+thirdparty/ffmpeg/LICENSE.md. List of the files with their origin and
+license, patches with reason and date (none at the moment) in
+thirdparty/ffmpeg/VENDORED.md. No file of the subset is under the GPL (no
+CONFIG_GPL or CONFIG_NONFREE enabled; libavutil/macos_kperf.h, GPL and
+macOS-only, is excluded).
+
+Some files of the subset have their own permissive license, stated in their
+header: libavcodec/faandct.c (ISC), libavutil/adler32.c (zlib),
+libavutil/avsscanf.c (MIT, from musl), libavcodec/jfdctfst.c,
+libavcodec/jfdctint_template.c, libavcodec/jrevdct.c (IJG license): this
+software is based in part on the work of the Independent JPEG Group.
+
+==============================================================================
+Dependencies (submodules and FetchContent, with their own license in the
+source; full texts and attributions in THIRD_PARTY_NOTICES.md)
+
+XenonRecomp      https://github.com/hedge-dev/XenonRecomp      MIT
+                 Copyright (c) 2025 hedge-dev and contributors
+                 thirdparty/XenonRecomp/LICENSE.md
+o1heap           https://github.com/pavel-kirienko/o1heap      MIT
+                 Copyright (c) 2020 Pavel Kirienko
+                 thirdparty/o1heap/LICENSE (tag 3.0.0)
+SDL              https://github.com/libsdl-org/SDL             zlib
+                 Copyright (C) 1997-2026 Sam Lantinga
+                 thirdparty/SDL/LICENSE.txt (tag release-3.4.18; full text
+                 below). Static library with only the joystick/gamepad,
+                 events and HIDAPI subsystems (cmake/SDL.cmake). The HIDAPI
+                 code included in SDL (thirdparty/SDL/src/hidapi) can be used,
+                 at the user's choice, under GPL-3.0, BSD or the original
+                 HIDAPI license (thirdparty/SDL/src/hidapi/LICENSE.txt): here
+                 GPL-3.0.
+FidelityFX SDK   https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK  MIT
+                 Copyright (C) Advanced Micro Devices, Inc.
+                 thirdparty/fidelityfx/LICENSE.md (tag v2.3.0): API headers in
+                 thirdparty/fidelityfx/Kits (MIT); the signed DLLs
+                 amd_fidelityfx_loader_dx12.dll,
+                 amd_fidelityfx_upscaler_dx12.dll and
+                 amd_fidelityfx_framegeneration_dx12.dll (same MIT list) are
+                 not in the repository: downloaded by the build
+                 (cmake/FidelityFX.cmake, pinned SHA-256), loaded at runtime
+                 and copied next to gow2.exe with
+                 licenses/FidelityFX-SDK-LICENSE.md.
+gow2_dlss        runtime/gpu/dlss_bridge/                      MIT
+                 Copyright (c) 2026 gow2 contributors
+                 runtime/gpu/dlss_bridge/LICENSE.txt: DLSS bridge
+                 (gow2_dlss.dll), built only with the NVIDIA DLSS SDK
+                 (https://github.com/NVIDIA/DLSS, NVIDIA RTX SDKs License),
+                 which is not in the repository; a build from source copies
+                 gow2_dlss.dll, nvngx_dlss.dll, nvngx_dlssg.dll and the two
+                 licenses next to gow2.exe (cmake/Dlss.cmake). gow2.exe loads
+                 it at runtime. The release contains gow2_dlss.dll but not
+                 the NVIDIA DLLs: the launcher downloads them on the user's
+                 request from NVIDIA's GitHub repository.
+NVAPI            https://github.com/NVIDIA/nvapi               MIT
+                 Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES
+                 thirdparty/nvapi/License.txt (commit 70d337d): minimal
+                 extract (nvapi_vrr.h: structs and IDs to read the monitor's
+                 VRR state). No NVIDIA library: the driver's nvapi64.dll is
+                 loaded at runtime, if present.
+Dear ImGui       https://github.com/ocornut/imgui              MIT
+                 Copyright (c) 2014-2026 Omar Cornut
+                 thirdparty/imgui/LICENSE.txt (tag v1.93.0): core, win32 +
+                 dx11 backends for the launcher and dx12 backend for the F1
+                 overlay (cmake/ImGui.cmake).
+Catch2           https://github.com/catchorg/Catch2            BSL-1.0
+                 Copyright Catch2 Authors
+                 tests only (cmake/Catch2.cmake, v3.7.1)
+
+==============================================================================
+SDL - license text (thirdparty/SDL/LICENSE.txt, release-3.4.18)
+
+Copyright (C) 1997-2026 Sam Lantinga <slouken@libsdl.org>
+
+This software is provided 'as-is', without any express or implied
+warranty.  In no event will the authors be held liable for any damages
+arising from the use of this software.
+
+Permission is granted to anyone to use this software for any purpose,
+including commercial applications, and to alter it and redistribute it
+freely, subject to the following restrictions:
+
+1. The origin of this software must not be misrepresented; you must not
+   claim that you wrote the original software. If you use this software
+   in a product, an acknowledgment in the product documentation would be
+   appreciated but is not required.
+2. Altered source versions must be plainly marked as such, and must not be
+   misrepresented as being the original software.
+3. This notice may not be removed or altered from any source distribution.
