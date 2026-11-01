@@ -20,6 +20,7 @@
 #include <vector>
 
 struct ImportRecord;
+struct PPCContext;
 
 namespace kernel::module {
 
@@ -46,6 +47,7 @@ struct ExecutableInfo {
 uint32_t InitExecutable(const ExecutableInfo&);
 uint32_t ExecutableHandle();  // hmodule, 0 before InitExecutable
 uint32_t ExecutableHeader();  // guest address of the XEX header
+uint32_t ExecutableTitleId();  // title id of XEX_HEADER_EXECUTION_INFO (0x40006), 0 without one
 
 // Fills the areas of the imported variables (type 0 records resolved by
 // ResolveImports) like Xenia: XboxHardwareInfo (flags 0x20, 6 CPUs),
@@ -57,5 +59,15 @@ uint32_t ExecutableHeader();  // guest address of the XEX header
 std::vector<std::string> InitKernelVariables(std::span<const ImportRecord> records);
 // Stops updating KeTimeStampBundle (idempotent).
 void StopKernelVariables();
+
+// Kernel modules (xam.xex, xboxkrnl.exe) answer XexGetModuleHandle and
+// XexLoadImage with an LDR of their own; XexGetProcedureAddress on them gives
+// the KERNEL_EXPORT implementation of the ordinal at a guest address the
+// installer makes callable (the runtime owns the function table). The
+// installer returns 0 when it has no slot left; without one every kernel
+// procedure is not found.
+using HostFunction = void(PPCContext&, uint8_t*);
+using ProcedureInstaller = uint32_t (*)(HostFunction*);
+void SetProcedureInstaller(ProcedureInstaller);
 
 }  // namespace kernel::module

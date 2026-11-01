@@ -143,6 +143,14 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
   ID3D12Resource* Gow2ColorTarget0() const;
   bool Gow2CopyColorTarget0(ID3D12Resource* dst, uint32_t width,
                             uint32_t height);
+  // gow2: copy of the depth plane of the last Update's depth render target
+  // (host render target path) into a readback buffer, in the current command
+  // list, leaving the render target in its prior state (shader capture). The
+  // footprint of the copy goes to footprint_out; false (nothing recorded) if
+  // there is no depth target or buffer_size is smaller than size_out.
+  bool Gow2CopyDepthTarget(ID3D12Resource* buffer, uint64_t buffer_size,
+                           D3D12_PLACED_SUBRESOURCE_FOOTPRINT& footprint_out,
+                           uint64_t& size_out);
 
  protected:
   bool IsGammaFormatHostStorageSeparate() const override;

@@ -87,6 +87,7 @@ TEST_CASE("game_patches: patch not requested, nothing written", "[game_patches]"
 TEST_CASE("game_patches: table order and settings keys", "[game_patches]") {
   const auto all = All();
   REQUIRE(all.size() == size_t(kPatchCount));
+  for (int i = 0; i < kPatchCount; ++i) CHECK(Available(i));  // GoW2: every patch exists
   CHECK(std::string(all[kShowFps].key) == "show_fps");
   CHECK(std::string(all[kDisableMotionBlur].key) == "disable_motion_blur");
   CHECK(std::string(all[kDisableLensFlares].key) == "disable_lens_flares");

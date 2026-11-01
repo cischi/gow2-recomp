@@ -19,11 +19,13 @@
 #include <vector>
 
 #include "game_data.h"
+#include "game_profile.h"
 #include "launcher/game_setup.h"
 #include "launcher/imgui_style.h"
 #include "launcher/launcher_model.h"
 #include "launcher/nvidia_dlls.h"
 #include "launcher/optiscaler.h"
+#include "launcher/win_d3d11.h"
 #include "log.h"
 #include "run_extract.h"
 #include "settings.h"
@@ -64,66 +66,27 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
 // Client area kWindowWidth x kWindowHeight at the PanelScale scale (DPI, reduced by FitScale to fit the work
 // area, times ui_scale %); above 100% at most as tall as the work area (PanelHeight: the panel scrolls).
-// Centered in the work area of the window's monitor. Returns the scale.
-float PlaceWindow(HWND hwnd, DWORD style, UINT dpi, uint32_t ui_scale) {
-  MONITORINFO mi{sizeof mi};
-  GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTOPRIMARY), &mi);
-  RECT frame{0, 0, 0, 0};
-  AdjustWindowRectExForDpi(&frame, style, FALSE, 0, dpi);
-  const int work_h = mi.rcWork.bottom - mi.rcWork.top, frame_h = frame.bottom - frame.top;
-  const float scale = PanelScale(float(dpi) / 96, work_h, frame_h, ui_scale);
-  RECT r{0, 0, int(kWindowWidth * scale), int(PanelHeight(scale, ui_scale, work_h - frame_h))};
-  AdjustWindowRectExForDpi(&r, style, FALSE, 0, dpi);
-  const int w = r.right - r.left, h = r.bottom - r.top;
-  const int x = mi.rcWork.left + (mi.rcWork.right - mi.rcWork.left - w) / 2;
-  const int y = mi.rcWork.top + (mi.rcWork.bottom - mi.rcWork.top - h) / 2;
-  SetWindowPos(hwnd, nullptr, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
-  return scale;
+float PlaceLauncherWindow(HWND hwnd, DWORD style, UINT dpi, uint32_t ui_scale) {
+  return PlaceWindow(hwnd, style, dpi, [ui_scale](float dpi_scale, int work_h, int frame_h) {
+    const float scale = PanelScale(dpi_scale, work_h, frame_h, ui_scale);
+    return Placement{scale, int(kWindowWidth * scale), int(PanelHeight(scale, ui_scale, work_h - frame_h))};
+  });
 }
 
-struct D3D {
-  ComPtr<ID3D11Device> device;
-  ComPtr<ID3D11DeviceContext> context;
-  ComPtr<IDXGISwapChain> swap_chain;
-  ComPtr<ID3D11RenderTargetView> rtv;
-};
-
-bool CreateD3D(HWND hwnd, D3D& d, std::string& why) {
-  DXGI_SWAP_CHAIN_DESC sd{};
-  sd.BufferCount = 2;
-  sd.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-  sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-  sd.OutputWindow = hwnd;
-  sd.SampleDesc.Count = 1;
-  sd.Windowed = TRUE;
-  sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
-  HRESULT hr = E_FAIL;
-  for (const D3D_DRIVER_TYPE type : {D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP}) {
-    hr = D3D11CreateDeviceAndSwapChain(nullptr, type, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &sd,
-                                       &d.swap_chain, &d.device, nullptr, &d.context);
-    if (SUCCEEDED(hr)) break;
-  }
-  if (FAILED(hr)) {
-    char b[64];
-    std::snprintf(b, sizeof b, "Direct3D 11 unavailable (0x%08lX)", static_cast<unsigned long>(hr));
-    why = b;
-    return false;
-  }
-  ComPtr<ID3D11Texture2D> back;
-  if (FAILED(d.swap_chain->GetBuffer(0, IID_PPV_ARGS(&back))) ||
-      FAILED(d.device->CreateRenderTargetView(back.Get(), nullptr, &d.rtv))) {
-    why = "launcher back buffer unavailable";
-    return false;
-  }
-  return true;
+// UTF-8 -> UTF-16 for the Win32 calls.
+std::wstring Widen(const std::string& text) {
+  const int n = MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, nullptr, 0);
+  std::wstring w(n > 0 ? n : 1, L'\0');
+  MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, w.data(), n);
+  w.resize(w.size() - 1);  // drop the terminator written by MultiByteToWideChar
+  return w;
 }
+
+std::wstring GameName() { return Widen(std::string(game_profile::Get().name)); }
 
 // Yes/No box with a UTF-8 text from launcher_text.
 bool ConfirmOverwrite(HWND owner, const char* text) {
-  const int n = MultiByteToWideChar(CP_UTF8, 0, text, -1, nullptr, 0);
-  std::wstring w(n > 0 ? n : 1, L'\0');
-  MultiByteToWideChar(CP_UTF8, 0, text, -1, w.data(), n);
-  return MessageBoxW(owner, w.c_str(), L"Gears of War 2", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) == IDYES;
+  return MessageBoxW(owner, Widen(text).c_str(), GameName().c_str(), MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) == IDYES;
 }
 
 // Total size of the files under dir (0 if it does not exist); unreadable entries are skipped.
@@ -150,10 +113,6 @@ std::filesystem::path PickIso(HWND owner, const wchar_t* title) {
   ofn.lpstrTitle = title;
   ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
   return GetOpenFileNameW(&ofn) ? std::filesystem::path(file) : std::filesystem::path();
-}
-
-bool DataReady(const std::filesystem::path& dir) {
-  return game_data::ExtractionComplete(dir) && game_data::CheckXex(dir) == game_data::XexCheck::kOk;
 }
 
 }  // namespace
@@ -276,6 +235,7 @@ Result Run(const std::filesystem::path& config, const LaunchOptions& options, st
   st.resolutions = ResolutionChoices(MonitorModes(), st.s.video.width, st.s.video.height);
   st.windows_italian = WindowsUiIsItalian();
   st.dlss_available = DlssBridgePresent(ExeDir());
+  st.unavailable = UnavailableOptions();
   st.dlss_download_available = DlssDownloadAvailable(ExeDir());
   std::tie(st.desktop_w, st.desktop_h) = plat::PrimaryMonitorSize();
   st.fg_available = FrameGenerationDllsPresent(ExeDir());
@@ -287,8 +247,8 @@ Result Run(const std::filesystem::path& config, const LaunchOptions& options, st
   // std::async future waits for the thread: closing during the installation cancels it (CancelInstall, after the
   // loop), so the wait is short (a copy that has already started finishes).
   std::future<std::optional<std::string>> install;
-  const std::filesystem::path data_dir = game_data::ResolveDataDir(ExeDir());
-  st.data_ready = DataReady(data_dir);
+  const std::filesystem::path data_dir = game_data::ResolveDataDir(ExeDir(), game_profile::Get().data_dir);
+  st.data_ready = DataReady(data_dir, game_profile::Get().image_sha256);
   Extraction extraction;
   std::future<std::optional<std::string>> dlss_download;  // nvidia_dlls::Install; cancelled on close like the OptiScaler install
   const bool italian = UiLanguageFor(st.s.language, st.windows_italian) == UiLanguage::kItalian;
@@ -302,7 +262,8 @@ Result Run(const std::filesystem::path& config, const LaunchOptions& options, st
   wc.lpszClassName = kClass;
   if (!RegisterClassExW(&wc)) return fail("window class not registered");
   constexpr DWORD kStyle = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
-  HWND hwnd = CreateWindowExW(0, kClass, italian ? L"Gears of War 2 - Impostazioni" : L"Gears of War 2 - Settings", kStyle, CW_USEDEFAULT, CW_USEDEFAULT,
+  const std::wstring title = GameName() + (italian ? L" - Impostazioni" : L" - Settings");
+  HWND hwnd = CreateWindowExW(0, kClass, title.c_str(), kStyle, CW_USEDEFAULT, CW_USEDEFAULT,
                               kWindowWidth, kWindowHeight, nullptr, nullptr, inst, nullptr);
   if (!hwnd) {
     UnregisterClassW(kClass, inst);
@@ -310,7 +271,7 @@ Result Run(const std::filesystem::path& config, const LaunchOptions& options, st
   }
   UINT dpi = GetDpiForWindow(hwnd);
   uint32_t ui_scale = st.s.video.ui_scale;  // last value used for the window
-  float scale = PlaceWindow(hwnd, kStyle, dpi, ui_scale);
+  float scale = PlaceLauncherWindow(hwnd, kStyle, dpi, ui_scale);
   st.hdr_display = QueryHdrDisplay(hwnd);  // after PlaceWindow: the output is the window's
 
   Result result = Result::kQuit;
@@ -349,7 +310,7 @@ Result Run(const std::filesystem::path& config, const LaunchOptions& options, st
         if (g_dpi_changed) dpi = g_dpi_changed;
         g_dpi_changed = 0;
         ui_scale = st.s.video.ui_scale;
-        ApplyScale(PlaceWindow(hwnd, kStyle, dpi, ui_scale));  // redone on the new monitor or with the new scale
+        ApplyScale(PlaceLauncherWindow(hwnd, kStyle, dpi, ui_scale));  // redone on the new monitor or with the new scale
         // The swap chain follows the new client area.
         d.rtv.Reset();
         d.swap_chain->ResizeBuffers(0, 0, 0, DXGI_FORMAT_UNKNOWN, 0);
@@ -433,7 +394,8 @@ Result Run(const std::filesystem::path& config, const LaunchOptions& options, st
         if (!iso.empty() && (!st.data_ready || ConfirmOverwrite(hwnd, tx.overwrite_data))) {
           // The files being replaced free their space: count the current folder as available.
           const uint64_t free = FreeSpaceFor(data_dir), existing = DirBytes(data_dir);
-          const IsoCheck check = CheckIso(iso, free > UINT64_MAX - existing ? UINT64_MAX : free + existing);
+          const IsoCheck check = CheckIso(iso, free > UINT64_MAX - existing ? UINT64_MAX : free + existing,
+                                          game_profile::Get().image_sha256);
           switch (check) {
             case IsoCheck::kOk: st.data_message.clear(); break;
             case IsoCheck::kNotAnIso: st.data_message = tx.iso_not_an_iso; break;
@@ -457,7 +419,7 @@ Result Run(const std::filesystem::path& config, const LaunchOptions& options, st
           const int rc = extraction.result.get();
           st.extracting = false;
           if (!extraction.log.str().empty()) LogLine("[extract] " + extraction.log.str());
-          st.data_ready = DataReady(data_dir);
+          st.data_ready = DataReady(data_dir, game_profile::Get().image_sha256);
           if (rc == 3) st.data_message = tx.extract_cancelled;
           else if (rc != 0) st.data_message = tx.extract_failed + extraction.LastLogLine();
           else if (!st.data_ready) st.data_message = tx.extract_wrong_edition;

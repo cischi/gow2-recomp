@@ -41,6 +41,7 @@ struct D3D12Options {
   plat::Window* window = nullptr;  // nullptr: no presenter (tests)
   std::vector<ScreenshotRequest> screenshots;    // --screenshot repeatable, queued in the presenter
   std::chrono::steady_clock::time_point start;  // each screenshot is at start + seconds
+  bool shader_capture = false;  // --shader-capture (hidden): F11 records shaders and shots (gpu/shader_capture.h)
   // gpu::PresentOptions (presenter.h, which includes Xenia): the back buffer always
   // follows the client area (a fixed back buffer stretched by DXGI on a monitor
   // of a different aspect distorts the image); stretch (false = fit); vsync.
@@ -74,6 +75,10 @@ struct D3D12Options {
   // without a window: no overlay. Apply -> Presenter::SetVideo + plat::ApplyWindowOptions.
   std::optional<settings::Settings> settings;
   std::filesystem::path config;
+  // Xenia's persistent shader/pipeline storage in <shader_cache_root>/shaders/shareable/<title id>.*
+  // (the per-game user data folder); empty: no storage (tests).
+  std::filesystem::path shader_cache_root;
+  uint32_t title_id = 0;
 };
 
 // nullptr + message in the log if the device cannot be created (main: exit 5,
@@ -86,6 +91,10 @@ std::unique_ptr<Backend> CreateD3D12Backend(GuestMemory&, const D3D12Options&);
 // called by xe::FatalError (Xenia code, device lost) before
 // exiting with code 5.
 void SetFatalErrorHook(void (*hook)());
+
+// --shader-capture: before _Exit (any thread), a running recording is stopped and the write queue drained, so the
+// shots already queued reach the disk; shots still in the presenter's readback ring are lost. No-op otherwise.
+void StopShaderCaptureBeforeExit();
 
 // gow2::xenia::SetCvar (--gpu-cvar name=value): false if the cvar does not exist
 // (even if it is not linked) or the value is not valid for its type.

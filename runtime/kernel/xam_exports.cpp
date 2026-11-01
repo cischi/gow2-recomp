@@ -8,7 +8,7 @@
 // src/xenia/kernel/xnotifylistener.cc, xenumerator.cc, kernel_state.cc
 // (CompleteOverlapped*, RegisterNotifyListener) and xam/content_manager.cc.
 // Deviations are noted case by case. Only the imports the game
-// really uses are implemented (config/expected_xex.json).
+// really uses are implemented (games/gow2/expected_xex.json).
 //
 // Model:
 //  - a single user, index 0, authenticated locally (signin state 1), name
@@ -64,6 +64,7 @@ constexpr uint32_t kErrorNoMoreFiles = 0x12;
 constexpr uint32_t kErrorInvalidParameter = 0x57;
 constexpr uint32_t kErrorInsufficientBuffer = 0x7A;
 constexpr uint32_t kErrorAlreadyExists = 0xB7;
+constexpr uint32_t kErrorIoIncomplete = 0x3E4;
 constexpr uint32_t kErrorIoPending = 0x3E5;
 constexpr uint32_t kErrorDeviceNotConnected = 0x48F;
 constexpr uint32_t kErrorNotFound = 0x490;
@@ -74,6 +75,14 @@ constexpr uint32_t kErrorFunctionFailed = 0x65B;
 constexpr uint32_t HResultFromWin32(uint32_t e) { return e ? (0x80070000u | (e & 0xFFFF)) : 0; }
 constexpr uint32_t kEInvalidArg = 0x80070057;  // X_E_INVALIDARG
 constexpr uint32_t kENoSuchUser = 0x80070525;  // X_E_NO_SUCH_USER
+constexpr uint32_t kStatusInvalidHandle = 0xC0000008;
+constexpr uint32_t kStatusNoMemory = 0xC0000017;
+
+// XAM's own app (XMsg app 0xFE, Xenia apps/xam_app.cc) and its message that
+// enumerates an XamContentAggregateCreateEnumerator handle.
+constexpr uint32_t kXamAppId = 0xFE;
+constexpr uint32_t kMsgContentAggregateEnumerate = 0x0002000E;
+constexpr uint32_t kXObjSignature = 0x58454E00;  // 'XEN\0' (Xenia xobject.h), magic of the aggregate data
 
 // User: local index 0, stable fictitious XUID and not online.
 constexpr uint32_t kUserCount = 4;
@@ -198,12 +207,35 @@ std::vector<std::weak_ptr<NotifyListener>> g_listeners;
 // ---- enumerators ---------------------------------------------------------------------
 
 // Xenia: XStaticUntypedEnumerator (xenumerator.cc). Fixed-size items
-// copied in blocks of `per_enumerate`. Deviation: the guest object
-// X_KENUMERATOR does not exist (XamGetPrivateEnumStructureFromHandle is not
-// implemented).
+// copied in blocks of `per_enumerate`. The guest X_KENUMERATOR exists only
+// once XamGetPrivateEnumStructureFromHandle asks for it.
 class Enumerator final : public KernelObject {
  public:
-  Enumerator(uint32_t item_size, uint32_t per_enumerate) : item_size_(item_size), per_enumerate_(per_enumerate) {}
+  // X_KENUMERATOR fields Xenia's XEnumerator::Initialize sets: the title sends
+  // open_message to app_id (XMsg) to enumerate through XAM.
+  struct Messages {
+    uint32_t app_id, open_message, close_message, user_index;  // all 0 for `{}`
+  };
+  Enumerator(uint32_t item_size, uint32_t per_enumerate, Messages messages = {})
+      : item_size_(item_size), per_enumerate_(per_enumerate), messages_(messages) {}
+  ~Enumerator() override {
+    if (MemorySystem* m = Memory(); m && guest_private_) m->heap.Free(guest_private_);
+  }
+  // X_KENUMERATOR { app_id, open_message, close_message, user_index,
+  // items_per_enumerate, flags } followed by Xenia's aggregate extra data
+  // { magic, handle }; allocated on first use, 0 if memory is missing.
+  uint32_t GuestPrivate(uint32_t handle) {
+    std::lock_guard lock(mutex_);
+    if (guest_private_) return guest_private_;
+    MemorySystem* m = Memory();
+    if (!m || !(guest_private_ = m->heap.Alloc(kSize))) return 0;
+    be<uint32_t>* p = GuestPtr<be<uint32_t>>(guest_private_);
+    const uint32_t fields[kSize / 4] = {messages_.app_id,     messages_.open_message, messages_.close_message,
+                                        messages_.user_index, per_enumerate_,         0,
+                                        kXObjSignature,       handle};
+    for (uint32_t i = 0; i < kSize / 4; ++i) p[i] = fields[i];
+    return guest_private_;
+  }
   void Append(const uint8_t* item) { items_.insert(items_.end(), item, item + item_size_); }
   // WriteItems: ERROR_NO_MORE_FILES when the items are exhausted.
   uint32_t WriteItems(uint8_t* out, uint32_t* written) {
@@ -222,7 +254,10 @@ class Enumerator final : public KernelObject {
   uint8_t GuestType() const override { return kNotificationEvent; }
 
  private:
+  static constexpr uint32_t kSize = 32;
   const uint32_t item_size_, per_enumerate_;
+  const Messages messages_;
+  uint32_t guest_private_ = 0;
   std::vector<uint8_t> items_;
   std::mutex mutex_;
   size_t current_ = 0;
@@ -549,6 +584,31 @@ uint32_t XamContentCreateEnumeratorImpl(uint32_t /*user_index*/, uint32_t device
   return kErrorSuccess;
 }
 
+// Xenia: XamContentAggregateCreateEnumerator_entry (xuid, device_id,
+// content_type, unknown, handle_out): one XCONTENT_AGGREGATE_DATA (XCONTENT_DATA
+// + xuid + title id) per enumeration. Deviation: no title has installed
+// downloadable content here, so the enumerator is empty.
+uint32_t XamContentAggregateCreateEnumeratorImpl(uint64_t /*xuid*/, uint32_t /*device_id*/,
+                                                 uint32_t /*content_type*/, uint32_t /*unknown*/,
+                                                 uint32_t handle_out) {
+  if (!handle_out) return kEInvalidArg;
+  *P32(handle_out) = HandleCreate(std::make_shared<Enumerator>(
+      kXContentDataSize + 12, 1, Enumerator::Messages{kXamAppId, kMsgContentAggregateEnumerate, 0x20010, 0xFF}));
+  return kErrorSuccess;
+}
+
+// Xenia: XamGetPrivateEnumStructureFromHandle_entry: the enumerator's guest
+// X_KENUMERATOR, with a reference the caller drops with ObDereferenceObject.
+uint32_t XamGetPrivateEnumStructureFromHandleImpl(uint32_t handle, be<uint32_t>* out_object) {
+  auto e = std::dynamic_pointer_cast<Enumerator>(HandleGet(handle));
+  if (!e) return kStatusInvalidHandle;
+  const uint32_t object = e->GuestPrivate(handle);
+  if (!object) return kStatusNoMemory;
+  ObjectReference(object, e);
+  if (out_object) *out_object = object;
+  return 0;
+}
+
 // Xenia: xeXamEnumerate / XamEnumerate_entry.
 uint32_t XamEnumerateImpl(uint32_t handle, uint32_t /*flags*/, uint32_t buffer, uint32_t /*buffer_length*/,
                           uint32_t items_returned, uint32_t overlapped) {
@@ -581,6 +641,14 @@ uint32_t XamCreateEnumeratorHandleImpl(uint32_t, uint32_t, uint32_t, uint32_t, u
 
 // Xenia: XamUserGetSigninState_entry.
 uint32_t XamUserGetSigninStateImpl(uint32_t user_index) { return user_index == 0 ? kSigninLocal : 0; }
+
+// Device context of a user's controller. Always zeroes the output, so a caller that
+// ignores the result never reads stale stack data; succeeds for the signed-in user 0
+// and the "any user" index 0xFF, the other users have no pad (device not connected).
+uint32_t XamUserGetDeviceContextImpl(uint32_t user_index, uint32_t /*unk*/, uint32_t out_ptr) {
+  if (be<uint32_t>* out = GuestPtr<be<uint32_t>>(out_ptr)) *out = 0;
+  return user_index == 0 || (user_index & 0xFF) == 0xFF ? 0 : kErrorDeviceNotConnected;
+}
 
 // Xenia: XamUserGetXUID_entry. The local profile is of type 1|2.
 uint32_t XamUserGetXUIDImpl(uint32_t user_index, uint32_t type_mask, uint32_t xuid_ptr) {
@@ -1010,7 +1078,19 @@ uint32_t DispatchAppMessage(uint32_t app, uint32_t message, uint32_t buffer, uin
     if (std::optional<uint32_t> r = DispatchXmpMessage(message, buffer)) return *r;
   } else if (app == 0xFB) {
     if (std::optional<uint32_t> r = DispatchXgiMessage(message, buffer)) return *r;
-  } else if (app != 0xFE) {
+  } else if (app == kXamAppId && message == kMsgContentAggregateEnumerate) {
+    // Xenia XamApp::DispatchMessageSync 0x0002000E: { user_index, ?, extra (the
+    // X_KENUMERATOR's aggregate data), buffer, buffer_size, ?, length_ptr, ? };
+    // the next item, X_E_NO_MORE_FILES when there are none.
+    be<uint32_t>* args = P32(buffer);
+    be<uint32_t>* extra = args ? P32(args[2]) : nullptr;
+    auto e = extra ? std::dynamic_pointer_cast<Enumerator>(HandleGet(extra[1])) : nullptr;
+    if (!e) return kEInvalidArg;
+    uint32_t count = 0;
+    const uint32_t result = args[3] ? e->WriteItems(GuestPtr<uint8_t>(args[3]), &count) : kErrorInvalidParameter;
+    if (be<uint32_t>* length = P32(args[6])) *length = result == kErrorSuccess ? count : 0;
+    return HResultFromWin32(result);
+  } else if (app != kXamAppId) {
     LogLine("[kernel] XMsg: unknown app " + Hex(app) + " (message " + Hex(message) + ")");
     return kENotFound;
   }
@@ -1041,6 +1121,46 @@ uint32_t XMsgStartIORequestExImpl(uint32_t app, uint32_t message, uint32_t overl
 // Xenia: XMsgCancelIORequest_entry: requests are already completed; with
 // wait != 0 the event is tried without blocking (Xenia Wait with timeout 0).
 uint32_t XMsgCancelIORequestImpl(uint32_t /*overlapped*/, uint32_t /*wait*/) { return 0; }
+
+// Xenia: XMsgCompleteIORequest_entry (CompleteOverlappedImmediateEx).
+uint32_t XMsgCompleteIORequestImpl(uint32_t overlapped, uint32_t result, uint32_t extended_error,
+                                   uint32_t length) {
+  CompleteOverlappedEx(overlapped, result, extended_error, length);
+  return kErrorSuccess;
+}
+
+// Xenia: XamGetOverlappedResult_entry: the result if already complete,
+// otherwise ERROR_IO_INCOMPLETE without an event, or an infinite wait on it
+// (Xenia waits whatever `wait` says).
+uint32_t XamGetOverlappedResultImpl(uint32_t overlapped, be<uint32_t>* length, uint32_t /*wait*/) {
+  be<uint32_t>* ov = P32(overlapped);
+  if (!ov) return kErrorInvalidParameter;
+  uint32_t result = ov[0];
+  if (result == kErrorIoPending) {
+    auto ev = ov[3] ? HandleGet(ov[3]) : nullptr;
+    if (!ev) return kErrorIoIncomplete;
+    const std::shared_ptr<KernelObject> objects[] = {ev};
+    result = WaitAny(objects, nullptr, false) == 0 ? uint32_t(ov[0]) : kErrorFunctionFailed;
+  }
+  if (length) *length = ov[1];
+  return result;
+}
+
+// Xenia: XamTaskSchedule_entry: the callback runs with the message on a new
+// thread whose handle goes to handle_ptr.
+uint32_t XamTaskScheduleImpl(uint32_t callback, uint32_t message, uint32_t /*unknown*/, be<uint32_t>* handle_ptr) {
+  auto t = GuestThread::Create(callback, message, 0, false);
+  if (!t) return kStatusNoMemory;
+  const uint32_t handle = HandleCreate(std::move(t));
+  if (handle_ptr) *handle_ptr = handle;
+  return 0;
+}
+
+// Xenia: XamTaskCloseHandle_entry: releases the task's handle. A task still
+// running keeps its thread alive until it ends (GuestThread holds itself).
+uint32_t XamTaskCloseHandleImpl(uint32_t handle) {
+  return HandleClose(handle) ? kErrorSuccess : kStatusInvalidHandle;
+}
 
 }  // namespace
 
@@ -1091,6 +1211,7 @@ void Reset() {
 }  // namespace kernel::xam
 
 KERNEL_EXPORT(XamUserGetSigninState, kernel::xam::XamUserGetSigninStateImpl)
+KERNEL_EXPORT(XamUserGetDeviceContext, kernel::xam::XamUserGetDeviceContextImpl)
 KERNEL_EXPORT(XamUserGetXUID, kernel::xam::XamUserGetXUIDImpl)
 KERNEL_EXPORT(XamUserGetSigninInfo, kernel::xam::XamUserGetSigninInfoImpl)
 KERNEL_EXPORT(XamUserGetName, kernel::xam::XamUserGetNameImpl)
@@ -1109,6 +1230,7 @@ KERNEL_EXPORT(XamContentSetThumbnail, kernel::xam::XamContentSetThumbnailImpl)
 KERNEL_EXPORT(XamContentGetDeviceState, kernel::xam::XamContentGetDeviceStateImpl)
 KERNEL_EXPORT(XamContentGetDeviceData, kernel::xam::XamContentGetDeviceDataImpl)
 KERNEL_EXPORT(XamContentCreateEnumerator, kernel::xam::XamContentCreateEnumeratorImpl)
+KERNEL_EXPORT(XamContentAggregateCreateEnumerator, kernel::xam::XamContentAggregateCreateEnumeratorImpl)
 KERNEL_EXPORT(XamEnumerate, kernel::xam::XamEnumerateImpl)
 KERNEL_EXPORT(XamCreateEnumeratorHandle, kernel::xam::XamCreateEnumeratorHandleImpl)
 KERNEL_EXPORT(XamShowSigninUI, kernel::xam::XamShowSigninUIImpl)
@@ -1130,3 +1252,8 @@ KERNEL_EXPORT(XMsgInProcessCall, kernel::xam::XMsgInProcessCallImpl)
 KERNEL_EXPORT(XMsgStartIORequest, kernel::xam::XMsgStartIORequestImpl)
 KERNEL_EXPORT(XMsgStartIORequestEx, kernel::xam::XMsgStartIORequestExImpl)
 KERNEL_EXPORT(XMsgCancelIORequest, kernel::xam::XMsgCancelIORequestImpl)
+KERNEL_EXPORT(XMsgCompleteIORequest, kernel::xam::XMsgCompleteIORequestImpl)
+KERNEL_EXPORT(XamGetOverlappedResult, kernel::xam::XamGetOverlappedResultImpl)
+KERNEL_EXPORT(XamTaskSchedule, kernel::xam::XamTaskScheduleImpl)
+KERNEL_EXPORT(XamTaskCloseHandle, kernel::xam::XamTaskCloseHandleImpl)
+KERNEL_EXPORT(XamGetPrivateEnumStructureFromHandle, kernel::xam::XamGetPrivateEnumStructureFromHandleImpl)

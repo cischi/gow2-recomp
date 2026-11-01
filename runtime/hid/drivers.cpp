@@ -34,6 +34,8 @@ class ScriptDriver final : public InputDriver {
       if (e.ly) pad.thumb_ly = e.ly;
       if (e.lt) pad.left_trigger = e.lt;
       if (e.rt) pad.right_trigger = e.rt;
+      if (e.rx) pad.thumb_rx = e.rx;
+      if (e.ry) pad.thumb_ry = e.ry;
       if (!seen_[i].exchange(true, std::memory_order_relaxed)) kernel::stats::NoteInputInjectedEvent();
     }
     return pad;

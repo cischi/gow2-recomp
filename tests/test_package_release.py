@@ -14,10 +14,10 @@ DECOYS = ["gow2.log", "OptiScaler.ini", "nvngx_dlss.dll", "nvngx_dlssg.dll", "nv
 
 def _fake_repo(tmp_path):
     root = tmp_path / "repo"
-    (root / "config").mkdir(parents=True)
+    (root / "games" / "gow2").mkdir(parents=True)
     for name in ("LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md", "README.md"):
         (root / name).write_text(name)
-    (root / "config" / "gow2.toml").write_text("xenonrecomp")
+    (root / "games" / "gow2" / "gow2.toml").write_text("xenonrecomp")
     build = tmp_path / "build"
     for name in package_release.BUILD_FILES + ["licenses/a.txt", "licenses/b.md"] + DECOYS:
         p = build / name

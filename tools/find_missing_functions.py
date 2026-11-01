@@ -6,6 +6,7 @@ Usage: find_missing_functions.py <image.bin> <info.json> <ppc_func_mapping.cpp>
 1) Inline switches: the sequence
        lis r12,T@ha / addi r12,r12,T@l / slwi r0,rX,2 / lwzx r0,r12,r0 /
        mtctr r0 / bctr
+   (or with slwi before addi, as the GoW3 compiler orders them)
    immediately followed (T = bctr+4) by a table of pointers into code. Without a
    cmplwi/bgt before it, XenonAnalyse cannot derive the number of entries and does not
    list it: XenonRecomp translates the bctr as an indirect call and decodes the
@@ -30,7 +31,7 @@ Usage: find_missing_functions.py <image.bin> <info.json> <ppc_func_mapping.cpp>
    function start, known or found.
 
 Prints to stdout the lines `{ address = 0x..., size = 0x... }, # ...` for the
-`functions` list of config/gow2.toml and, after a comment line, the
+`functions` list of games/gow2/gow2.toml and, after a comment line, the
 [[switch]] entries for gow2_switch_tables.toml; a summary on stderr.
 """
 import argparse
@@ -218,6 +219,8 @@ def find_inline_switches(img: Image, known: set, switch_bases: set, bctr_labels:
             if img.word(a) != BCTR or img.word(a - 4) != MTCTR_R0 or img.word(a - 8) != LWZX_R0_R12_R0:
                 continue
             slwi, addi, lis = img.word(a - 12), img.word(a - 16), img.word(a - 20)
+            if addi >> 16 != 0x398C:  # GoW3 order: lis / rlwinm / addi
+                slwi, addi = addi, slwi
             # rlwinm r0,rS,2,0,29 / addi r12,r12,lo / lis r12,ha
             if slwi & 0xFC1FFFFF != 0x5400103A or addi >> 16 != 0x398C or lis >> 16 != 0x3D80:
                 continue

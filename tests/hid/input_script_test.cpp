@@ -58,6 +58,10 @@ TEST_CASE("input_script: left stick and triggers", "[input_script]") {
   CHECK(((*e)[1].lx == -32767 && (*e)[1].ly == 0));
   CHECK(((*e)[2].lt == 255 && (*e)[2].rt == 0 && (*e)[2].hold_ms == 400));
   CHECK(((*e)[3].rt == 255 && (*e)[3].lt == 0));
+  auto r = hid::ParseInputScript("1:RS_UP,2:RS_LEFT+50");
+  REQUIRE(r);
+  CHECK(((*r)[0].ry == 32767 && (*r)[0].rx == 0 && (*r)[0].ly == 0));
+  CHECK(((*r)[1].rx == -32767 && (*r)[1].ry == 0 && (*r)[1].hold_ms == 50));
 }
 
 TEST_CASE("input_script: invalid scripts", "[input_script]") {

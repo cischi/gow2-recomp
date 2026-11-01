@@ -2,8 +2,8 @@
 # XenonRecomp resolves relative paths against the folder of this file.
 
 [main]
-file_path = "../game_data/default.xex"
-out_directory_path = "../build/generated"
+file_path = "../../game_data/default.xex"
+out_directory_path = "../../build/generated"
 switch_table_file_path = "gow2_switch_tables.toml"
 
 skip_lr = false
@@ -62,7 +62,7 @@ invalid_instructions = [
 #    without a cmplwi/bgt before it): the linear scan closed the function at the bctr and
 #    decoded the table as code, swallowing the first case. Output of
 #      python tools/find_missing_functions.py build/xex/image.bin build/xex/info.json
-#        build/generated/ppc_func_mapping.cpp --switch-tables config/gow2_switch_tables.toml
+#        build/generated/ppc_func_mapping.cpp --switch-tables games/gow2/gow2_switch_tables.toml
 #    (the tables are in gow2_switch_tables.toml).
 functions = [
     { address = 0x82230368, size = 0x214 }, # switch loaded at 0x82230378: the function ends (exclusive) at 0x8223057C

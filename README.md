@@ -1,16 +1,18 @@
-# gow2-recomp: Gears of War 2 PC port (static recompilation)
+# gow2-recomp: Gears of War 2 and 3 PC port (static recompilation)
 
-An unofficial, fan-made PC port of Gears of War 2 (Xbox 360). The game's executable (`default.xex`) is translated
-ahead of time into C++ by [XenonRecomp](https://github.com/hedge-dev/XenonRecomp) and compiled into a native Windows
-program, `gow2.exe`. A runtime written for this project implements the Xbox 360 kernel, GPU, audio and input on top of
+An unofficial, fan-made PC port of Gears of War 2 and Gears of War 3 (Xbox 360). Each game's executable (`default.xex`)
+is translated ahead of time into C++ by [XenonRecomp](https://github.com/hedge-dev/XenonRecomp) and compiled into a
+native Windows program, `gow2.exe` and `gow3.exe`; `gears.exe` is a small window that lets you pick one of them. A runtime written for this project implements the Xbox 360 kernel, GPU, audio and input on top of
 components from [Xenia](https://github.com/xenia-canary/xenia-canary), Direct3D 12, SDL3 and Dear ImGui.
 
 **This project is not affiliated with or endorsed by Microsoft, Xbox Game Studios or Epic Games.** "Gears of War" is a
 trademark of Microsoft; it is used here only to identify the game the port works with.
 
-**You need your own copy of the game:** a disc image (ISO) of Gears of War 2 for Xbox 360, **PAL Europe edition**.
-No game files are included in this repository or in the releases. Other editions are rejected: `gow2.exe` checks the
-SHA-256 of `default.xex` against the version it was recompiled from.
+**You need your own copy of the game:** a disc image (ISO) for Xbox 360 of Gears of War 2 (**PAL Europe edition**)
+and/or Gears of War 3 (**World or Italian edition**).
+No game files are included in this repository or in the releases. Other editions are rejected: each exe checks the
+SHA-256 of the decrypted `default.xex` image against the version it was recompiled from, so a dump from another region
+is accepted only if it contains exactly the same code (for Gears of War 3 the World and Italian discs both qualify).
 
 ## Contents
 
@@ -33,16 +35,17 @@ SHA-256 of `default.xex` against the version it was recompiled from.
 - A CPU with AVX2 (the vendored Xenia code is compiled with `/arch:AVX2`; `gow2.exe` does not start without it).
 - A GPU with a Direct3D 12 driver and feature level 11_0 (a hardware adapter; `gow2.exe --gpu-probe` prints the one
   it finds).
-- About 6.5 GB of free disk space for the extracted game data.
+- Free disk space for the extracted game data: about 6.5 GB for Gears of War 2, about 8 GB for Gears of War 3.
 - Optional: an NVIDIA RTX GPU for DLSS (RTX 40 or later for DLSS frame generation); AMD FSR works on any GPU.
 
 ## Installing and playing
 
 1. Download the release zip and extract it to a folder of your choice.
-2. Run `gow2.exe`. The launcher opens.
-3. The launcher reports "Game data missing". Click **Choose ISO...** and select your Gears of War 2 ISO (PAL Europe).
+2. Run `gears.exe` and pick the game, or run `gow2.exe` / `gow3.exe` directly. The game's launcher opens.
+3. The launcher reports "Game data missing". Click **Choose ISO...** and select your ISO (Gears of War 2: PAL Europe;
+   Gears of War 3: World or Italian).
 4. The launcher checks the ISO (valid Xbox 360 image, `default.xex` of the supported edition, enough free space) and
-   extracts it to `game_data` next to `gow2.exe`, with a progress bar. Extraction can be cancelled; an interrupted
+   extracts it to `game_data` (Gears of War 3: `game_data_gow3`) next to the exe, with a progress bar. Extraction can be cancelled; an interrupted
    extraction is never mistaken for a complete one. After it finishes the ISO is no longer needed.
 5. Click **Play**. It stays disabled until the game data is ready.
 
@@ -61,6 +64,9 @@ Settings are stored in `gow2.toml` next to `gow2.exe`. They can be changed in tw
   applies immediately what can change at runtime (V-Sync, VRR, scaling, sharpness, anisotropic filtering,
   anti-aliasing, game patches, window mode and resolution); the panel marks the options that take effect at the next
   launch. **Close**, Esc or F1 again close it without applying.
+- **Screenshots**: **F12** saves the next frame, as shown on screen (overlay included), to
+  `screenshots\gow2\` or `screenshots\gow3\` next to the executable, named `<game>_YYYY-MM-DD_HH-MM-SS-mmm.bmp`
+  (24-bit BMP at the output resolution).
 
 The menus are in Italian or English: Italian if `[game] language` is `it`, English for the other languages; without
 `[game] language` they follow the Windows display language. **UI scale** (75-150%) resizes the launcher and the overlay.
@@ -144,7 +150,9 @@ For a high refresh rate monitor, 1x with DLSS; for the best quality at 1440p, 2x
 
 ## Status and known limits
 
-The single-player campaign is playable, with movies and saves.
+The single-player campaign of both games is playable, with movies and saves. The settings, files and options below
+are written for `gow2.exe`; `gow3.exe` works the same way with `gow3` in the names (`gow3.toml`, `gow3.log`,
+`game_data_gow3/`, `user_data_gow3/`).
 
 - No multiplayer and no co-op: network and Xbox Live services are not implemented.
 - No voice chat.
@@ -266,7 +274,8 @@ console = false              # log console window
 
 - `game_data/`: the extracted game (read-only for the game). Never share it.
 - `user_data/`: created next to the data folder, or where `--user-data` points. `content/` holds the saves, `cache/` the
-  game's cache device, `engine/` the patched engine settings. Delete it to start over (this deletes your saves).
+  game's cache device, `engine/` the patched engine settings, `shaders/` the shader and pipeline cache (rebuilt when
+  deleted; it removes the first-use hitches on later runs). Delete it to start over (this deletes your saves).
 - `gow2.toml`: settings. `gow2.log`: log of the last run, written to the current directory.
 
 ## Building from source
@@ -361,8 +370,8 @@ Tests that need the game data, the ISO, a D3D12 adapter or a Xenia checkout are 
 
 ## Legal
 
-- This repository contains no copyrighted material of the game: no ISO, XEX, assets or recompiled code. The files in
-  `config/` contain only addresses and metadata obtained by analysing the executable (function boundaries, switch
+- This repository contains no copyrighted material of the game: no ISO, XEX, assets or recompiled code. The TOML/JSON files in
+  `games/<id>/` (`gow2.toml`, `gow2_switch_tables.toml`, `expected_xex.json` and the same for GoW3) contain only addresses and metadata obtained by analysing the executable (function boundaries, switch
   tables, the expected hash), a common practice in recompilation projects such as Unleashed Recomp.
 - The **release** contains `gow2.exe`, which includes code recompiled from the game's executable. It contains no game
   assets: to play you need your own copy of Gears of War 2 (Xbox 360, PAL Europe), from which the launcher extracts

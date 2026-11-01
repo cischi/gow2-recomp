@@ -1,0 +1,83 @@
+diff --git a/src/xenia/gpu/d3d12/d3d12_render_target_cache.cc b/src/xenia/gpu/d3d12/d3d12_render_target_cache.cc
+index 022c066..9303310 100644
+--- a/src/xenia/gpu/d3d12/d3d12_render_target_cache.cc
++++ b/src/xenia/gpu/d3d12/d3d12_render_target_cache.cc
+@@ -2142,6 +2142,46 @@ bool D3D12RenderTargetCache::Gow2CopyColorTarget0(ID3D12Resource* dst,
+                                          width, height);
+ }
+ 
++// gow2: shader capture, see the declaration.
++bool D3D12RenderTargetCache::Gow2CopyDepthTarget(
++    ID3D12Resource* buffer, uint64_t buffer_size,
++    D3D12_PLACED_SUBRESOURCE_FOOTPRINT& footprint_out, uint64_t& size_out) {
++  size_out = 0;
++  if (GetPath() != Path::kHostRenderTargets) {
++    return false;
++  }
++  auto* render_target = static_cast<D3D12RenderTarget*>(
++      last_update_accumulated_render_targets()[0]);
++  if (!render_target) {
++    return false;
++  }
++  ID3D12Resource* resource = render_target->resource();
++  const D3D12_RESOURCE_DESC desc = resource->GetDesc();
++  command_processor_.GetD3D12Provider().GetDevice()->GetCopyableFootprints(
++      &desc, 0, 1, 0, &footprint_out, nullptr, nullptr, &size_out);
++  if (!buffer || buffer_size < size_out) {
++    return false;
++  }
++  const D3D12_RESOURCE_STATES state =
++      render_target->SetResourceState(D3D12_RESOURCE_STATE_COPY_SOURCE);
++  render_target->SetResourceState(state);
++  command_processor_.PushTransitionBarrier(resource, state,
++                                           D3D12_RESOURCE_STATE_COPY_SOURCE);
++  command_processor_.SubmitBarriers();
++  D3D12_TEXTURE_COPY_LOCATION from = {}, to = {};
++  from.pResource = resource;
++  from.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
++  from.SubresourceIndex = 0;
++  to.pResource = buffer;
++  to.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
++  to.PlacedFootprint = footprint_out;
++  command_processor_.GetDeferredCommandList().D3DCopyTextureRegion(
++      &to, 0, 0, 0, &from, nullptr);
++  command_processor_.PushTransitionBarrier(
++      resource, D3D12_RESOURCE_STATE_COPY_SOURCE, state);
++  return true;
++}
++
+ void D3D12RenderTargetCache::TransitionRenderTarget(
+     D3D12RenderTarget& render_target, D3D12_RESOURCE_STATES new_state) {
+   D3D12_RESOURCE_STATES old_state = render_target.SetResourceState(new_state);
+diff --git a/src/xenia/gpu/d3d12/d3d12_render_target_cache.h b/src/xenia/gpu/d3d12/d3d12_render_target_cache.h
+index 55de9f9..fbfee04 100644
+--- a/src/xenia/gpu/d3d12/d3d12_render_target_cache.h
++++ b/src/xenia/gpu/d3d12/d3d12_render_target_cache.h
+@@ -143,6 +143,14 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
+   ID3D12Resource* Gow2ColorTarget0() const;
+   bool Gow2CopyColorTarget0(ID3D12Resource* dst, uint32_t width,
+                             uint32_t height);
++  // gow2: copy of the depth plane of the last Update's depth render target
++  // (host render target path) into a readback buffer, in the current command
++  // list, leaving the render target in its prior state (shader capture). The
++  // footprint of the copy goes to footprint_out; false (nothing recorded) if
++  // there is no depth target or buffer_size is smaller than size_out.
++  bool Gow2CopyDepthTarget(ID3D12Resource* buffer, uint64_t buffer_size,
++                           D3D12_PLACED_SUBRESOURCE_FOOTPRINT& footprint_out,
++                           uint64_t& size_out);
+ 
+  protected:
+   bool IsGammaFormatHostStorageSeparate() const override;
+diff --git a/src/xenia/gpu/d3d12/d3d12_command_processor.h b/src/xenia/gpu/d3d12/d3d12_command_processor.h
+index ac92241..acc6dab 100644
+--- a/src/xenia/gpu/d3d12/d3d12_command_processor.h
++++ b/src/xenia/gpu/d3d12/d3d12_command_processor.h
+@@ -139,6 +139,8 @@ class D3D12CommandProcessor : public CommandProcessor {
+     return *render_target_cache_;
+   }
+   D3D12TextureCache& Gow2TextureCache() const { return *texture_cache_; }
++  // gow2: shared memory, for the shader capture's copies of what draws read.
++  D3D12SharedMemory& Gow2SharedMemory() const { return *shared_memory_; }
+   // gow2: copies the rectangle (0, 0, w, h) of src (state src_state) into dst
+   // (state COPY_DEST) in the current command list, then src returns to
+   // src_state; false if the rectangle exceeds src or dst is null (patch 0013).

@@ -791,7 +791,14 @@ uint32_t NtQueryInformationFileImpl(uint32_t file_handle, uint32_t iosb, uint32_
     case kFileIoPriorityInformation:
       out = 4;
       break;
-    default:  // Sector, XctdCompression, Name, Allocation: like Xenia, unsupported
+    // First sector of the file on its device, used by the XDK's XGetFilePhysicalSortKey to
+    // order reads by disc position. Host files have no disc layout, so the key is a constant 0.
+    // Xenia returns STATUS_INVALID_PARAMETER here; success avoids the caller's error path
+    // (SetLastError, key -1) on every async read and costs nothing.
+    case kFileSectorInformation:
+      out = 4;
+      break;
+    default:  // XctdCompression, Name, Allocation: like Xenia, unsupported
       LogIo("NtQueryInformationFile: class " + std::to_string(info_class) + " unsupported");
       status = kStatusInvalidParameter;
       break;

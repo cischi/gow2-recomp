@@ -2,7 +2,7 @@
 # imports, argument marshalling, summary counters). Builds without the
 # generated code: it uses XenonUtils' ppc_context.h, with the same layout as the
 # PPCContext of the one copied into build/generated (no PPC_CONFIG_*
-# option enabled in config/gow2.toml).
+# option enabled in games/gow2/gow2.toml).
 #
 # tools/gen_import_stubs.py reads the KERNEL_EXPORTs from the .cpp files in this folder
 # (cmake/Recompile.cmake) and does not generate a stub for those names.
@@ -32,5 +32,5 @@ add_library(gow2_kernel STATIC
 # Includes are "kernel/xxx.h", from the runtime/ folder.
 target_include_directories(gow2_kernel PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/..")
 # XenonUtils: be<T> (xbox.h, which includes windows.h) and ppc_context.h/simde.
-target_link_libraries(gow2_kernel PUBLIC XenonUtils PRIVATE gow2_runtime o1heap)
+target_link_libraries(gow2_kernel PUBLIC XenonUtils PRIVATE gow2_runtime gow2_xex_check o1heap)
 target_compile_definitions(gow2_kernel PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN)

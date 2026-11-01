@@ -1,0 +1,205 @@
+diff --git a/XenonAnalyse/main.cpp b/XenonAnalyse/main.cpp
+index d08371e..b76bf29 100644
+--- a/XenonAnalyse/main.cpp
++++ b/XenonAnalyse/main.cpp
+@@ -21,16 +21,46 @@ struct SwitchTable
+     uint32_t type{};
+ };
+ 
+-void ReadTable(Image& image, SwitchTable& table)
++static bool IsNop(uint32_t word)
+ {
+-    uint32_t pOffset;
+-    ppc_insn insn;
+-    auto* code = (uint32_t*)image.Find(table.base);
+-    ppc::Disassemble(code, table.base, insn);
+-    pOffset = insn.operands[1] << 16;
++    return ByteSwap(word) == 0x60000000; // ori r0,r0,0
++}
++
++// The instructions of a matched pattern, without the nops that some compilers
++// (GoW3) schedule between them.
++static std::vector<ppc_insn> PatternInstructions(const uint32_t* code, size_t base, size_t count)
++{
++    std::vector<ppc_insn> insns;
++    for (size_t i = 0; insns.size() < count; i++)
++    {
++        if (IsNop(code[i]))
++            continue;
++        ppc::Disassemble(&code[i], base + 4 * i, insns.emplace_back());
++    }
++    return insns;
++}
+ 
+-    ppc::Disassemble(code + 1, table.base + 4, insn);
+-    pOffset += insn.operands[2];
++void ReadTable(Image& image, SwitchTable& table, size_t patternSize)
++{
++    // Operands are found by opcode, not by position: compilers order lis/addi/rlwinm
++    // differently (GoW2: lis, addi, rlwinm; GoW3: lis, rlwinm, addi).
++    const auto insns = PatternInstructions((const uint32_t*)image.Find(table.base), table.base, patternSize);
++    auto nth = [&](uint32_t id, size_t n) -> const ppc_insn&
++        {
++            for (const auto& insn : insns)
++            {
++                if (insn.opcode->id == id && n-- == 0)
++                    return insn;
++            }
++            assert(false);
++            return insns[0];
++        };
++    // lis/addi pair n: the table address (n = 0) or the base of the case offsets (n = 1).
++    auto address = [&](size_t n) -> uint32_t
++        {
++            return (nth(PPC_INST_LIS, n).operands[1] << 16) + nth(PPC_INST_ADDI, n).operands[2];
++        };
++    const uint32_t pOffset = address(0);
+ 
+     if (table.type == SWITCH_ABSOLUTE)
+     {
+@@ -42,57 +72,33 @@ void ReadTable(Image& image, SwitchTable& table)
+     }
+     else if (table.type == SWITCH_COMPUTED)
+     {
+-        uint32_t base;
+-        uint32_t shift;
+         const auto* offsets = (uint8_t*)image.Find(pOffset);
+-
+-        ppc::Disassemble(code + 4, table.base + 0x10, insn);
+-        base = insn.operands[1] << 16;
+-
+-        ppc::Disassemble(code + 5, table.base + 0x14, insn);
+-        base += insn.operands[2];
+-
+-        ppc::Disassemble(code + 3, table.base + 0x0C, insn);
+-        shift = insn.operands[2];
++        const uint32_t base = address(1);
++        const uint32_t shift = nth(PPC_INST_RLWINM, 0).operands[2];
+ 
+         for (size_t i = 0; i < table.labels.size(); i++)
+         {
+             table.labels[i] = base + (offsets[i] << shift);
+         }
+     }
+-    else if (table.type == SWITCH_BYTEOFFSET || table.type == SWITCH_SHORTOFFSET)
++    else if (table.type == SWITCH_BYTEOFFSET)
+     {
+-        if (table.type == SWITCH_BYTEOFFSET)
+-        {
+-            const auto* offsets = (uint8_t*)image.Find(pOffset);
+-            uint32_t base;
+-
+-            ppc::Disassemble(code + 3, table.base + 0x0C, insn);
+-            base = insn.operands[1] << 16;
+-
+-            ppc::Disassemble(code + 4, table.base + 0x10, insn);
+-            base += insn.operands[2];
++        const auto* offsets = (uint8_t*)image.Find(pOffset);
++        const uint32_t base = address(1);
+ 
+-            for (size_t i = 0; i < table.labels.size(); i++)
+-            {
+-                table.labels[i] = base + offsets[i];
+-            }
+-        }
+-        else if (table.type == SWITCH_SHORTOFFSET)
++        for (size_t i = 0; i < table.labels.size(); i++)
+         {
+-            const auto* offsets = (be<uint16_t>*)image.Find(pOffset);
+-            uint32_t base;
+-
+-            ppc::Disassemble(code + 4, table.base + 0x10, insn);
+-            base = insn.operands[1] << 16;
+-
+-            ppc::Disassemble(code + 5, table.base + 0x14, insn);
+-            base += insn.operands[2];
++            table.labels[i] = base + offsets[i];
++        }
++    }
++    else if (table.type == SWITCH_SHORTOFFSET)
++    {
++        const auto* offsets = (be<uint16_t>*)image.Find(pOffset);
++        const uint32_t base = address(1);
+ 
+-            for (size_t i = 0; i < table.labels.size(); i++)
+-            {
+-                table.labels[i] = base + offsets[i];
+-            }
++        for (size_t i = 0; i < table.labels.size(); i++)
++        {
++            table.labels[i] = base + offsets[i];
+         }
+     }
+     else
+@@ -153,10 +159,14 @@ void* SearchMask(const void* source, const uint32_t* compare, size_t compareCoun
+ 
+     for (size_t i = 0; i < count; i++)
+     {
++        // nops between the pattern instructions are skipped (see PatternInstructions)
+         size_t c = 0;
+-        for (c = 0; c < compareCount; c++)
++        size_t j = i;
++        for (c = 0; c < compareCount && j < count; c++, j++)
+         {
+-            ppc::Disassemble(&src[i + c], 0, insn);
++            while (c != 0 && j < count - 1 && IsNop(src[j]))
++                j++;
++            ppc::Disassemble(&src[j], 0, insn);
+             if (insn.opcode == nullptr || insn.opcode->id != compare[c])
+             {
+                 break;
+@@ -238,7 +248,7 @@ int main(int argc, char** argv)
+                         // fmt::println("{:X} ; jmptable - {}", base + (data - dataStart), table.labels.size());
+                         if (table.base != 0)
+                         {
+-                            ReadTable(image, table);
++                            ReadTable(image, table, count);
+                             printTable(table);
+                             switches.emplace_back(std::move(table));
+                         }
+@@ -260,6 +270,29 @@ int main(int argc, char** argv)
+         PPC_INST_BCTR,
+     };
+ 
++    // The same tables with the instructions in another order (GoW3).
++    uint32_t absoluteSwitchScheduled[] =
++    {
++        PPC_INST_LIS,
++        PPC_INST_RLWINM,
++        PPC_INST_ADDI,
++        PPC_INST_LWZX,
++        PPC_INST_MTCTR,
++        PPC_INST_BCTR,
++    };
++
++    uint32_t wordOffsetSwitchScheduled[] =
++    {
++        PPC_INST_LIS,
++        PPC_INST_RLWINM,
++        PPC_INST_ADDI,
++        PPC_INST_LHZX,
++        PPC_INST_LIS,
++        PPC_INST_ADDI,
++        PPC_INST_ADD,
++        PPC_INST_MTCTR,
++    };
++
+     uint32_t computedSwitch[] =
+     {
+         PPC_INST_LIS,
+@@ -297,6 +330,7 @@ int main(int argc, char** argv)
+ 
+     println("# ---- ABSOLUTE JUMPTABLE ----");
+     scanPattern(absoluteSwitch, std::size(absoluteSwitch), SWITCH_ABSOLUTE);
++    scanPattern(absoluteSwitchScheduled, std::size(absoluteSwitchScheduled), SWITCH_ABSOLUTE);
+ 
+     println("# ---- COMPUTED JUMPTABLE ----");
+     scanPattern(computedSwitch, std::size(computedSwitch), SWITCH_COMPUTED);
+@@ -304,6 +338,7 @@ int main(int argc, char** argv)
+     println("# ---- OFFSETED JUMPTABLE ----");
+     scanPattern(offsetSwitch, std::size(offsetSwitch), SWITCH_BYTEOFFSET);
+     scanPattern(wordOffsetSwitch, std::size(wordOffsetSwitch), SWITCH_SHORTOFFSET);
++    scanPattern(wordOffsetSwitchScheduled, std::size(wordOffsetSwitchScheduled), SWITCH_SHORTOFFSET);
+ 
+     std::ofstream f(argv[2]);
+     f.write(out.data(), out.size());

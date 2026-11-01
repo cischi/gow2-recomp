@@ -1,6 +1,7 @@
 #include "recomp_glue.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <utility>
 #include <vector>
@@ -56,6 +57,15 @@ std::expected<FunctionTableStats, std::string> InstallFunctionTable(uint8_t* bas
 }
 
 PPCFunc* LookupFunction(uint8_t* base, uint32_t guest) {
-  if (guest < PPC_CODE_BASE || guest >= PPC_CODE_BASE + PPC_CODE_SIZE || (guest & 3)) return nullptr;
+  if (guest < PPC_CODE_BASE || guest >= kExtraFunctionBase + kExtraFunctions * 4 || (guest & 3)) return nullptr;
   return PPC_LOOKUP_FUNC(base, guest);
+}
+
+uint32_t InstallExtraFunction(uint8_t* base, PPCFunc* func) {
+  static std::atomic<uint32_t> used{0};
+  const uint32_t i = used.fetch_add(1);
+  if (i >= kExtraFunctions) return 0;
+  const uint32_t guest = uint32_t(kExtraFunctionBase + i * 4);
+  PPC_LOOKUP_FUNC(base, guest) = func;
+  return guest;
 }

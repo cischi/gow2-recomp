@@ -306,3 +306,105 @@ TEST_CASE("vupkd3d128 FLOAT16_4: (x, y, z, w) from words z and w") {
     CHECK(getF(s, 2) == -kInf);
     CHECK(getF(s, 3) == kInf);
 }
+
+// ---- GoW3 (patches/xenonrecomp/0007) ----------------------------------------
+// Carry: XenonRecomp computes XER[CA] from the low 32 bits (as its addze/adde/subfe).
+
+TEST_CASE("addc: rA + rB, CA = carry out of the low word") {
+    PPCXERRegister xer{};
+    CHECK(ppc_addc(1, 2, xer) == 3);
+    CHECK(xer.ca == 0);
+    CHECK(uint32_t(ppc_addc(0xFFFFFFFF, 1, xer)) == 0);
+    CHECK(xer.ca == 1);
+    CHECK(uint32_t(ppc_addc(0x80000000, 0x80000000, xer)) == 0);
+    CHECK(xer.ca == 1);
+    CHECK(ppc_addc(0x7FFFFFFF, 0x7FFFFFFF, xer) == 0xFFFFFFFE);
+    CHECK(xer.ca == 0);
+}
+
+TEST_CASE("addme: rA + CA - 1, CA = carry out of the low word") {
+    PPCXERRegister xer{};
+    xer.ca = 0;
+    CHECK(uint32_t(ppc_addme(0, xer)) == 0xFFFFFFFF);  // 0 + 0 + 0xFFFFFFFF: no carry
+    CHECK(xer.ca == 0);
+    xer.ca = 0;
+    CHECK(uint32_t(ppc_addme(5, xer)) == 4);
+    CHECK(xer.ca == 1);
+    xer.ca = 1;
+    CHECK(uint32_t(ppc_addme(0, xer)) == 0);
+    CHECK(xer.ca == 1);
+    xer.ca = 1;
+    CHECK(uint32_t(ppc_addme(0xFFFFFFFF, xer)) == 0xFFFFFFFF);
+    CHECK(xer.ca == 1);
+}
+
+TEST_CASE("subfze: ~rA + CA, CA = carry out of the low word") {
+    PPCXERRegister xer{};
+    xer.ca = 1;
+    CHECK(uint32_t(ppc_subfze(0, xer)) == 0);  // ~0 + 1: carry
+    CHECK(xer.ca == 1);
+    xer.ca = 0;
+    CHECK(uint32_t(ppc_subfze(0, xer)) == 0xFFFFFFFF);
+    CHECK(xer.ca == 0);
+    xer.ca = 1;
+    CHECK(uint32_t(ppc_subfze(5, xer)) == uint32_t(-5));  // negation
+    CHECK(xer.ca == 0);
+    xer.ca = 0;
+    CHECK(uint32_t(ppc_subfze(5, xer)) == uint32_t(-6));
+    CHECK(xer.ca == 0);
+}
+
+TEST_CASE("mulhdu: unsigned high part of the 128-bit product") {
+    CHECK(ppc_mulhdu(2, 3) == 0);
+    CHECK(ppc_mulhdu(~uint64_t(0), 2) == 1);
+    CHECK(ppc_mulhdu(~uint64_t(0), ~uint64_t(0)) == 0xFFFFFFFFFFFFFFFEull);
+    CHECK(ppc_mulhdu(0x100000000ull, 0x100000000ull) == 1);
+}
+
+TEST_CASE("vslh/vsrh/vsrah: each halfword shifted by the low 4 bits of the same halfword of vB") {
+    PPCVRegister a = halves({0x8001, 0x00FF, 0xFFFF, 0x1234, 0x8000, 0x7FFF, 0x0001, 0xF000});
+    PPCVRegister b = halves({1, 4, 15, 16 + 4, 0, 0xFFF3, 8, 12});  // 16 + 4 -> 4, 0xFFF3 -> 3
+    PPCVRegister d{};
+    ppc_vslh(d, a, b);
+    const uint16_t sl[] = {0x0002, 0x0FF0, 0x8000, 0x2340, 0x8000, 0xFFF8, 0x0100, 0x0000};
+    for (int i = 0; i < 8; i++) CHECK(getH(d, i) == sl[i]);
+    ppc_vsrh(d, a, b);
+    const uint16_t sr[] = {0x4000, 0x000F, 0x0001, 0x0123, 0x8000, 0x0FFF, 0x0000, 0x000F};
+    for (int i = 0; i < 8; i++) CHECK(getH(d, i) == sr[i]);
+    ppc_vsrah(d, a, b);
+    const uint16_t sra[] = {0xC000, 0x000F, 0xFFFF, 0x0123, 0x8000, 0x0FFF, 0x0000, 0xFFFF};
+    for (int i = 0; i < 8; i++) CHECK(getH(d, i) == sra[i]);
+    ppc_vsrah(b, a, b);  // vD = vB
+    for (int i = 0; i < 8; i++) CHECK(getH(b, i) == sra[i]);
+}
+
+TEST_CASE("vaddsws: signed word add with saturation") {
+    PPCVRegister a = words({0x7FFFFFFF, 0x80000000, 5, 0xFFFFFFFF});
+    PPCVRegister b = words({1, 0xFFFFFFFF, 0xFFFFFFFD, 0xFFFFFFFF});
+    PPCVRegister d{};
+    ppc_vaddsws(d, a, b);
+    CHECK(getW(d, 0) == 0x7FFFFFFF);
+    CHECK(getW(d, 1) == 0x80000000);
+    CHECK(getW(d, 2) == 2);
+    CHECK(getW(d, 3) == 0xFFFFFFFE);
+}
+
+TEST_CASE("vcmpbfp: bit 0 = !(a <= b), bit 1 = !(a >= -b), NaN out of both bounds") {
+    PPCVRegister a = floats({0.5f, 2.0f, -3.0f, kNaN});
+    PPCVRegister b = floats({1.0f, 1.0f, 1.0f, 1.0f});
+    PPCVRegister d{};
+    CHECK_FALSE(ppc_vcmpbfp(d, a, b));
+    CHECK(getW(d, 0) == 0);
+    CHECK(getW(d, 1) == 0x80000000);
+    CHECK(getW(d, 2) == 0x40000000);
+    CHECK(getW(d, 3) == 0xC0000000);
+
+    PPCVRegister in = floats({1.0f, -1.0f, 0.0f, -0.0f});  // bounds are inclusive
+    CHECK(ppc_vcmpbfp(d, in, b));
+    for (int i = 0; i < 4; i++) CHECK(getW(d, i) == 0);
+
+    PPCVRegister neg = floats({0.0f, 0.0f, 0.0f, 0.0f});  // negative bound: no value fits
+    PPCVRegister nb = floats({-1.0f, -1.0f, -1.0f, -1.0f});
+    CHECK_FALSE(ppc_vcmpbfp(neg, neg, nb));  // vD = vA
+    CHECK(getW(neg, 0) == 0xC0000000);
+}

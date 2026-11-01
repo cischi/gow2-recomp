@@ -57,6 +57,15 @@ struct MemExportRange {
   uint32_t base_address_dwords;
   uint32_t size_dwords;
 };
+// gow2: called on the command processor thread for every draw that reaches
+// pipeline configuration, with the translations it uses; skipped = the draw
+// was not issued (pipeline not ready with async compilation). ps null: no
+// pixel shader. nullptr = no hook (the runtime's shader capture).
+using DrawObserverHook = void (*)(D3D12Shader::D3D12Translation& vs,
+                                  D3D12Shader::D3D12Translation* ps,
+                                  bool skipped);
+void SetDrawObserverHook(DrawObserverHook hook);
+
 // gow2: not final: runtime/gpu/d3d12_backend.cpp derives from it the command
 // processor that presents on each swap, counts resolves (IssueSwap/IssueCopy).
 class D3D12CommandProcessor : public CommandProcessor {
@@ -130,6 +139,8 @@ class D3D12CommandProcessor : public CommandProcessor {
     return *render_target_cache_;
   }
   D3D12TextureCache& Gow2TextureCache() const { return *texture_cache_; }
+  // gow2: shared memory, for the shader capture's copies of what draws read.
+  D3D12SharedMemory& Gow2SharedMemory() const { return *shared_memory_; }
   // gow2: copies the rectangle (0, 0, w, h) of src (state src_state) into dst
   // (state COPY_DEST) in the current command list, then src returns to
   // src_state; false if the rectangle exceeds src or dst is null (patch 0013).

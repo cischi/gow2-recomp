@@ -32,6 +32,10 @@ void ItemTooltip(const char* text) {
   ImGui::EndTooltip();
 }
 
+// Option this game does not have (LauncherState::unavailable): between BeginDisabled(off) and EndDisabled, then
+// the tooltip says why instead of `tip`. The value in the file is left as it is.
+void TooltipOr(bool off, const char* tip, const UiText& tx) { ItemTooltip(off ? tx.not_available : tip); }
+
 // tips: tooltip per entry (nullptr = none).
 template <typename E, size_t N>
 void EnumCombo(const char* id, E& value, const std::array<const char*, N>& names,
@@ -96,7 +100,7 @@ bool BeginSection(const char* title, const char* id) {
 }
 
 void DrawScreen(settings::Video& v, const std::vector<Resolution>& resolutions, const UiText& tx,
-                const hdr::Display& hdr_display) {
+                const hdr::Display& hdr_display, const std::set<std::string>& unavailable) {
   if (!BeginSection(tx.display, "##screen")) return;
   Row(tx.mode);
   EnumCombo("##mode", v.mode, std::array{tx.windowed, tx.borderless, tx.fullscreen});
@@ -129,21 +133,25 @@ void DrawScreen(settings::Video& v, const std::vector<Resolution>& resolutions, 
   Row(tx.scaling);
   EnumCombo("##scaling", v.scaling, std::array{tx.letterbox, tx.stretch});
   Row(tx.aspect);
+  const bool no_aspect = unavailable.count("aspect") != 0;
+  ImGui::BeginDisabled(no_aspect);
   EnumCombo("##aspect", v.aspect, std::array{"16:9", "21:9", "16:10"});
-  ItemTooltip(tx.aspect_tip);
+  ImGui::EndDisabled();
+  TooltipOr(no_aspect, tx.aspect_tip, tx);
   Row(tx.vsync);
   ImGui::Checkbox("##vsync", &v.vsync);
   Row(tx.vrr);
   EnumCombo("##vrr", v.vrr, std::array{tx.vrr_auto, tx.vrr_on, tx.vrr_off});
   ItemTooltip(tx.vrr_tip);
   Row(tx.hdr);
-  ImGui::BeginDisabled(!hdr_display.hdr && !v.hdr);  // can be turned off even without an HDR output
+  const bool no_hdr = unavailable.count("hdr") != 0;  // not in this game: the file's value stays, the runtime ignores it
+  ImGui::BeginDisabled(no_hdr || (!hdr_display.hdr && !v.hdr));  // can be turned off even without an HDR output
   ImGui::Checkbox("##hdr", &v.hdr);
   ImGui::EndDisabled();
-  ItemTooltip(hdr_display.hdr ? tx.hdr_tip : tx.hdr_unavailable);
-  if (v.hdr && !hdr_display.hdr) ImGui::TextWrapped("%s", tx.hdr_unavailable);
+  ItemTooltip(no_hdr ? tx.hdr_not_in_game : hdr_display.hdr ? tx.hdr_tip : tx.hdr_unavailable);
+  if (v.hdr && !hdr_display.hdr && !no_hdr) ImGui::TextWrapped("%s", tx.hdr_unavailable);
   const hdr::Levels auto_levels = AutoHdrLevels(v.hdr_peak_nits, hdr_display);
-  ImGui::BeginDisabled(!v.hdr);
+  ImGui::BeginDisabled(no_hdr || !v.hdr);
   NitsCombo(tx.hdr_peak, "##hdr_peak", v.hdr_peak_nits, {400, 600, 800, 1000, 1500, 2000, 4000},
             auto_levels.peak_nits, tx);
   ItemTooltip(tx.hdr_peak_tip);
@@ -337,30 +345,39 @@ Action DrawImage(settings::Video& v, settings::Engine& e, const UiText& tx, UiLa
   ItemTooltip(tx.anisotropic_tip);
   Row(tx.enhanced_shaders);
   ImGui::Checkbox("##enhanced", &v.enhanced_shaders);
+  const bool no_engine = st.unavailable.count("engine") != 0;
   Row(tx.shadow_quality);
+  ImGui::BeginDisabled(no_engine);
   EnumCombo("##shadow_quality", e.shadow_quality, std::array{tx.shadow_low, tx.shadow_original, tx.shadow_high});
-  ItemTooltip(tx.shadow_quality_tip);
+  ImGui::EndDisabled();
+  TooltipOr(no_engine, tx.shadow_quality_tip, tx);
   Row(tx.dynamic_shadows);
+  ImGui::BeginDisabled(no_engine);
   ImGui::Checkbox("##dynamic_shadows", &e.dynamic_shadows);
-  ItemTooltip(tx.dynamic_shadows_tip);
+  ImGui::EndDisabled();
+  TooltipOr(no_engine, tx.dynamic_shadows_tip, tx);
   ImGui::EndTable();
   return action;
 }
 
 // Checkbox bound to a [patches] key: on if the key is in the set.
-void PatchRow(std::set<std::string>& patches, const char* key, const char* label, const char* tip) {
+void PatchRow(std::set<std::string>& patches, const char* key, const char* label, const char* tip,
+              const std::set<std::string>& unavailable, const UiText& tx) {
   Row(label);
   bool on = patches.count(key) != 0;
   const std::string id = std::string("##patch_") + key;
+  const bool off = unavailable.count(key) != 0;
+  ImGui::BeginDisabled(off);
   if (ImGui::Checkbox(id.c_str(), &on)) {
     if (on) patches.insert(key);
     else patches.erase(key);
   }
-  ItemTooltip(tip);
+  ImGui::EndDisabled();
+  TooltipOr(off, tip, tx);
 }
 
 void DrawGame(std::string& language, settings::FrameRate& frame_rate, std::set<std::string>& patches, bool& console,
-              const UiText& tx) {
+              const std::set<std::string>& unavailable, const UiText& tx) {
   if (!BeginSection(tx.game, "##game")) return;
   Row(tx.language);
   std::string_view code = language;
@@ -371,13 +388,16 @@ void DrawGame(std::string& language, settings::FrameRate& frame_rate, std::set<s
     ImGui::EndCombo();
   }
   Row(tx.frame_rate);
+  const bool no_frame_rate = unavailable.count("frame_rate") != 0;
+  ImGui::BeginDisabled(no_frame_rate);
   EnumCombo("##frame_rate", frame_rate,
             std::array{tx.frame_rate_original, "60", "120", "144", tx.frame_rate_monitor, tx.frame_rate_unlimited});
-  ItemTooltip(tx.frame_rate_tip);
-  PatchRow(patches, "show_fps", tx.patch_show_fps, tx.patch_show_fps_tip);
-  PatchRow(patches, "disable_motion_blur", tx.patch_no_motion_blur, tx.patch_no_motion_blur_tip);
-  PatchRow(patches, "disable_lens_flares", tx.patch_no_lens_flares, tx.patch_no_lens_flares_tip);
-  PatchRow(patches, "disable_bloom", tx.patch_no_bloom, tx.patch_no_bloom_tip);
+  ImGui::EndDisabled();
+  TooltipOr(no_frame_rate, tx.frame_rate_tip, tx);
+  PatchRow(patches, "show_fps", tx.patch_show_fps, tx.patch_show_fps_tip, unavailable, tx);
+  PatchRow(patches, "disable_motion_blur", tx.patch_no_motion_blur, tx.patch_no_motion_blur_tip, unavailable, tx);
+  PatchRow(patches, "disable_lens_flares", tx.patch_no_lens_flares, tx.patch_no_lens_flares_tip, unavailable, tx);
+  PatchRow(patches, "disable_bloom", tx.patch_no_bloom, tx.patch_no_bloom_tip, unavailable, tx);
   Row(tx.console);
   ImGui::Checkbox("##console", &console);
   ItemTooltip(tx.console_tip);
@@ -430,13 +450,13 @@ Action DrawSettings(LauncherState& st) {
         action = Action::kChooseIso;
       }
     }
-    DrawScreen(st.s.video, st.resolutions, tx, st.hdr_display);
+    DrawScreen(st.s.video, st.resolutions, tx, st.hdr_display, st.unavailable);
     if (const Action a = DrawImage(st.s.video, st.s.engine, tx, UiLanguageFor(st.s.language, st.windows_italian),
                        st.dlss_available, st.fg_available, st.dlss_fg_available, st.desktop_w,
                        st.desktop_h, st);
         a != Action::kNone)
       action = a;
-    DrawGame(st.s.language, st.s.frame_rate, st.s.patches, st.s.console, tx);
+    DrawGame(st.s.language, st.s.frame_rate, st.s.patches, st.s.console, st.unavailable, tx);
 
     // Buttons at the bottom right; Play/Apply has the initial focus (Enter or the pad's A).
     const ImGuiStyle& style = ImGui::GetStyle();

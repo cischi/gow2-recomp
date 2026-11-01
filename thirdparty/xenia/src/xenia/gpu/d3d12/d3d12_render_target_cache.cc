@@ -2142,6 +2142,46 @@ bool D3D12RenderTargetCache::Gow2CopyColorTarget0(ID3D12Resource* dst,
                                          width, height);
 }
 
+// gow2: shader capture, see the declaration.
+bool D3D12RenderTargetCache::Gow2CopyDepthTarget(
+    ID3D12Resource* buffer, uint64_t buffer_size,
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT& footprint_out, uint64_t& size_out) {
+  size_out = 0;
+  if (GetPath() != Path::kHostRenderTargets) {
+    return false;
+  }
+  auto* render_target = static_cast<D3D12RenderTarget*>(
+      last_update_accumulated_render_targets()[0]);
+  if (!render_target) {
+    return false;
+  }
+  ID3D12Resource* resource = render_target->resource();
+  const D3D12_RESOURCE_DESC desc = resource->GetDesc();
+  command_processor_.GetD3D12Provider().GetDevice()->GetCopyableFootprints(
+      &desc, 0, 1, 0, &footprint_out, nullptr, nullptr, &size_out);
+  if (!buffer || buffer_size < size_out) {
+    return false;
+  }
+  const D3D12_RESOURCE_STATES state =
+      render_target->SetResourceState(D3D12_RESOURCE_STATE_COPY_SOURCE);
+  render_target->SetResourceState(state);
+  command_processor_.PushTransitionBarrier(resource, state,
+                                           D3D12_RESOURCE_STATE_COPY_SOURCE);
+  command_processor_.SubmitBarriers();
+  D3D12_TEXTURE_COPY_LOCATION from = {}, to = {};
+  from.pResource = resource;
+  from.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+  from.SubresourceIndex = 0;
+  to.pResource = buffer;
+  to.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+  to.PlacedFootprint = footprint_out;
+  command_processor_.GetDeferredCommandList().D3DCopyTextureRegion(
+      &to, 0, 0, 0, &from, nullptr);
+  command_processor_.PushTransitionBarrier(
+      resource, D3D12_RESOURCE_STATE_COPY_SOURCE, state);
+  return true;
+}
+
 void D3D12RenderTargetCache::TransitionRenderTarget(
     D3D12RenderTarget& render_target, D3D12_RESOURCE_STATES new_state) {
   D3D12_RESOURCE_STATES old_state = render_target.SetResourceState(new_state);

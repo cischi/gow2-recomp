@@ -18,6 +18,8 @@
 #include <functional>
 #include <iterator>
 #include <memory>
+#include <mutex>
+#include <algorithm>
 #include <string>
 #include <utility>
 #include <vector>
@@ -27,6 +29,7 @@
 #include "gpu/d3d12_probe.h"
 #include "gpu/frame_generation.h"
 #include "gpu/overlay.h"
+#include "gpu/png_writer.h"
 #include "gpu/presenter.h"
 #include "gpu_texture_util.h"
 #include "hdr_math.h"
@@ -2095,6 +2098,166 @@ TEST_CASE("presenter: HDR10 with the overlay open", "[presenter]") {
     REQUIRE(closed.w == 1280);
     CHECK(CodesFarFrom(closed, code, 1, 0, 0, 1280, 720) == 0);
     CHECK(provider->GetDevice()->GetDeviceRemovedReason() == S_OK);
+  }
+  plat::DestroyGameWindow(window);
+}
+
+// Shader capture: shots go through a ring of readback buffers to the write queue, with no GPU wait in Present; each
+// job has the size of the frame it was taken from and keeps the caller's file names and text.
+namespace {
+struct RecordedJobs {
+  std::mutex m;
+  std::vector<gpu::ImageJob> jobs;
+  gpu::ImageWriteQueue::WriteFn Fn() {
+    return [this](gpu::ImageJob& j) {
+      std::lock_guard g(m);
+      jobs.push_back(std::move(j));
+    };
+  }
+};
+gpu::ImageJob ShotJob(const char* name) {
+  gpu::ImageJob j;
+  j.png = name;
+  j.text = std::string(name) + ".txt";
+  j.text_contents = name;
+  return j;
+}
+}  // namespace
+
+TEST_CASE("presenter: capture shots go to the queue without blocking, with the presented size", "[presenter]") {
+  const auto adapter = gpu::FindHardwareAdapter();
+  if (!adapter) SKIP("no hardware D3D12 adapter");
+  auto provider = xe::ui::d3d12::D3D12Provider::Create();
+  REQUIRE(provider);
+  plat::Window* window = plat::CreateGameWindow("gow2 presenter test", {1280, 720}, false, [] {});
+  REQUIRE(window);
+  {
+    RecordedJobs rec;
+    gpu::ImageWriteQueue queue(1, 8, rec.Fn());
+    auto presenter = gpu::Presenter::Create(*provider, plat::NativeHandle(window));
+    REQUIRE(presenter);
+    REQUIRE(RefreshMid(*presenter, *provider));
+    presenter->QueueCaptureShot(ShotJob("a"), &queue);
+    REQUIRE(presenter->Present());
+    REQUIRE(presenter->Present());
+    presenter->FlushCaptureShots();
+    queue.Drain();
+    REQUIRE(rec.jobs.size() == 1);
+    const gpu::ImageJob& j = rec.jobs[0];
+    CHECK(j.png == std::filesystem::path("a"));
+    CHECK(j.text == std::filesystem::path("a.txt"));
+    CHECK(j.text_contents == "a");
+    CHECK(j.width == 1280);
+    CHECK(j.height == 720);
+    REQUIRE(j.pixels.size() == size_t(1280) * 720);
+    CHECK(j.pixels[size_t(360) * 1280 + 640] == 0x00804001u);
+    CHECK(presenter->CaptureShotsDropped() == 0);
+  }
+  plat::DestroyGameWindow(window);
+}
+
+TEST_CASE("presenter: capture shots in flight across a resize keep their own size", "[presenter]") {
+  const auto adapter = gpu::FindHardwareAdapter();
+  if (!adapter) SKIP("no hardware D3D12 adapter");
+  auto provider = xe::ui::d3d12::D3D12Provider::Create();
+  REQUIRE(provider);
+  plat::Window* window = plat::CreateGameWindow("gow2 presenter test", {1280, 720}, false, [] {});
+  REQUIRE(window);
+  void* hwnd = plat::NativeHandle(window);
+  {
+    RecordedJobs rec;
+    gpu::ImageWriteQueue queue(1, 8, rec.Fn());
+    auto presenter = gpu::Presenter::Create(*provider, hwnd);
+    REQUIRE(presenter);
+    REQUIRE(RefreshMid(*presenter, *provider));
+    presenter->QueueCaptureShot(ShotJob("big"), &queue);
+    REQUIRE(presenter->Present());
+    SetClientSize(hwnd, 800, 600);
+    presenter->QueueCaptureShot(ShotJob("small"), &queue);
+    REQUIRE(presenter->Present());
+    presenter->FlushCaptureShots();
+    queue.Drain();
+    REQUIRE(rec.jobs.size() == 2);
+    std::sort(rec.jobs.begin(), rec.jobs.end(), [](const auto& a, const auto& b) { return a.png < b.png; });
+    CHECK(rec.jobs[0].png == std::filesystem::path("big"));
+    CHECK(rec.jobs[0].width == 1280);
+    CHECK(rec.jobs[0].height == 720);
+    CHECK(rec.jobs[0].pixels.size() == size_t(1280) * 720);
+    CHECK(rec.jobs[1].width == 800);
+    CHECK(rec.jobs[1].height == 600);
+    REQUIRE(rec.jobs[1].pixels.size() == size_t(800) * 600);
+    CHECK(rec.jobs[1].pixels[size_t(300) * 800 + 400] == 0x00804001u);
+  }
+  plat::DestroyGameWindow(window);
+}
+
+TEST_CASE("presenter: HDR10, capture shots are the SDR image", "[presenter]") {
+  if (!gpu::FindHardwareAdapter()) SKIP("no hardware D3D12 adapter");
+  auto provider = xe::ui::d3d12::D3D12Provider::Create();
+  REQUIRE(provider);
+  plat::Window* window = plat::CreateGameWindow("gow2 presenter hdr", {1280, 720}, false, [] {});
+  REQUIRE(window);
+  const uint32_t gray = Gray10(0.5f);
+  const auto gray_at = [gray](uint32_t) { return gray; };
+  {
+    RecordedJobs rec;
+    gpu::ImageWriteQueue queue(1, 8, rec.Fn());
+    gpu::PresentOptions options;
+    options.width = 1280;
+    options.height = 720;
+    options.hdr = kHdrLevels;
+    auto presenter = gpu::Presenter::Create(*provider, plat::NativeHandle(window), options);
+    REQUIRE(presenter);
+    SKIP_WITHOUT_HDR(presenter);
+    REQUIRE(RefreshWith(*presenter, *provider, 1280, 720, gray_at));
+    presenter->QueueCaptureShot(ShotJob("hdr"), &queue);
+    REQUIRE(presenter->Present());
+    presenter->FlushCaptureShots();
+    queue.Drain();
+    REQUIRE(rec.jobs.size() == 1);
+    const uint32_t g8 = uint32_t(Gray8(0.5f));
+    const uint32_t expected = g8 << 16 | g8 << 8 | g8;
+    REQUIRE(rec.jobs[0].pixels.size() == size_t(1280) * 720);
+    CHECK(std::count(rec.jobs[0].pixels.begin(), rec.jobs[0].pixels.end(), expected) == 1280 * 720);
+  }
+  plat::DestroyGameWindow(window);
+}
+
+// Shader capture: F11 calls the overlay's callback (auto-repeat ignored); the recording indicator is drawn in the
+// top-left corner also with the panel closed, and only while recording.
+TEST_CASE("presenter: F11 toggles the shader capture, indicator with the panel closed", "[presenter]") {
+  const auto adapter = gpu::FindHardwareAdapter();
+  if (!adapter) SKIP("no hardware D3D12 adapter");
+  auto provider = xe::ui::d3d12::D3D12Provider::Create();
+  REQUIRE(provider);
+  plat::Window* window = plat::CreateGameWindow("gow2 overlay test", {1280, 720}, false, [] {});
+  REQUIRE(window);
+  const HWND hwnd = static_cast<HWND>(plat::NativeHandle(window));
+  gow2_test::TempDir dir("gow2_overlay_rec");
+  {
+    auto presenter = gpu::Presenter::Create(*provider, hwnd);
+    REQUIRE(presenter);
+    int toggles = 0;
+    auto overlay = gpu::Overlay::Create(window, dir.path / "gow2.toml", {}, {}, {}, [&] { ++toggles; });
+    REQUIRE(overlay);
+    gpu::Overlay* ov = overlay.get();
+    presenter->SetOverlay(std::move(overlay));
+    SendMessageW(hwnd, WM_KEYDOWN, VK_F11, 0x00570001);
+    SendMessageW(hwnd, WM_KEYDOWN, VK_F11, 0x40570001);  // auto-repeat
+    SendMessageW(hwnd, WM_KEYUP, VK_F11, 0xC0570001);
+    CHECK(toggles == 1);
+    CHECK_FALSE(ov->IsOpen());
+
+    REQUIRE(RefreshRed(*presenter, *provider));
+    CHECK(PixelsDifferentFrom(Shot(*presenter, dir.path / "off.bmp"), 255, 0, 0) == 0);
+    ov->SetRecording(true);
+    const auto on = Shot(*presenter, dir.path / "on.bmp");
+    REQUIRE(on.size() == 54 + 1280 * 720 * 3);
+    CHECK_FALSE(Near(PixelAt(on, 12, 12), {255, 0, 0}));
+    CHECK(Near(PixelAt(on, 640, 360), {255, 0, 0}));
+    CHECK(Near(PixelAt(on, 1270, 710), {255, 0, 0}));
+    ov->SetRecording(false);
+    CHECK(PixelsDifferentFrom(Shot(*presenter, dir.path / "off2.bmp"), 255, 0, 0) == 0);
   }
   plat::DestroyGameWindow(window);
 }

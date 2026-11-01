@@ -4,9 +4,11 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <span>
 #include <string>
 
 #include "game_data.h"
+#include "mini_xex.h"
 #include "temp_dir.h"
 
 namespace fs = std::filesystem;
@@ -48,14 +50,26 @@ TEST_CASE("sha256_bytes_and_file", "[game_data]") {
 TEST_CASE("check_xex", "[game_data]") {
   SkipEnv env("");
   gow2_test::TempDir tmp("gow2_gd_xex");
-  CHECK(game_data::CheckXex(tmp.path, kAbc) == game_data::XexCheck::kMissing);
-  Write(tmp.path / "default.xex", "abc");
-  CHECK(game_data::CheckXex(tmp.path, kAbc) == game_data::XexCheck::kOk);
+  const std::string xex = gow2_test::MiniXex("game");
+  const auto image = game_data::XexImageSha256(std::as_bytes(std::span(xex.data(), xex.size())));
+  REQUIRE(image.has_value());
+  CHECK(game_data::CheckXex(tmp.path, *image) == game_data::XexCheck::kMissing);
+  Write(tmp.path / "default.xex", gow2_test::MiniXex("game", 'k'));  // same image, other container
+  CHECK(game_data::CheckXex(tmp.path, *image) == game_data::XexCheck::kOk);
   CHECK(game_data::CheckXex(tmp.path, "00") == game_data::XexCheck::kMismatch);
+  Write(tmp.path / "default.xex", "abc");  // not an XEX
+  CHECK(game_data::CheckXex(tmp.path, *image) == game_data::XexCheck::kMismatch);
   _putenv_s("GOW2_SKIP_XEX_HASH", "1");
   CHECK(game_data::CheckXex(tmp.path, "00") == game_data::XexCheck::kOk);
   fs::remove(tmp.path / "default.xex");
   CHECK(game_data::CheckXex(tmp.path, "00") == game_data::XexCheck::kMissing);
+}
+
+TEST_CASE("check_xex_other_game_hash", "[game_data]") {
+  SkipEnv env("");
+  gow2_test::TempDir tmp("gow2_gd_xex_other");
+  Write(tmp.path / "default.xex", "any xex");
+  CHECK(game_data::CheckXex(tmp.path, std::string(64, '0')) == game_data::XexCheck::kMismatch);
 }
 
 TEST_CASE("extraction_complete", "[game_data]") {
@@ -75,8 +89,10 @@ TEST_CASE("resolve_data_dir", "[game_data]") {
   const fs::path cwd = tmp.path / "cwd";
   fs::create_directories(cwd);
   fs::current_path(cwd);
-  CHECK(game_data::ResolveDataDir(exe_dir) == exe_dir / "game_data");
-  fs::create_directories(cwd / "game_data");
-  CHECK(game_data::ResolveDataDir(exe_dir) == fs::path("game_data"));
+  for (const char* name : {"game_data", "game_data_gow3"}) {
+    CHECK(game_data::ResolveDataDir(exe_dir, name) == exe_dir / name);
+    fs::create_directories(cwd / name);
+    CHECK(game_data::ResolveDataDir(exe_dir, name) == fs::path(name));
+  }
   fs::current_path(old_cwd);
 }

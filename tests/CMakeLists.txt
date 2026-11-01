@@ -41,12 +41,13 @@ target_compile_options(recomp_emit_test PRIVATE -Wno-switch -Wno-unused-variable
 gow2_add_test(guest_address_test guest_address_test.cpp)
 target_include_directories(guest_address_test PRIVATE "${CMAKE_SOURCE_DIR}/runtime")
 
-# Minimal runtime. The [real] test compares the entry with config/expected_xex.json
+# Minimal runtime. The [real] test compares the entry with games/gow2/expected_xex.json
 # and loads game_data/default.xex (skipped if missing).
-file(READ "${CMAKE_SOURCE_DIR}/config/expected_xex.json" _expected_xex_json)
+file(READ "${CMAKE_SOURCE_DIR}/games/gow2/expected_xex.json" _expected_xex_json)
 string(JSON _expected_entry GET "${_expected_xex_json}" entry)
 string(JSON _expected_import_count GET "${_expected_xex_json}" import_count)
-set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/config/expected_xex.json")
+string(JSON _expected_sha256 GET "${_expected_xex_json}" image_sha256)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/games/gow2/expected_xex.json")
 gow2_add_test(runtime_test runtime_test.cpp)
 target_link_libraries(runtime_test PRIVATE gow2_runtime gow2_xex_check)
 target_compile_definitions(runtime_test PRIVATE
@@ -57,6 +58,24 @@ target_compile_definitions(runtime_test PRIVATE
 # game_data: hash of default.xex, extraction marker, data folder resolution.
 gow2_add_test(game_data_test game_data_test.cpp)
 target_link_libraries(game_data_test PRIVATE gow2_runtime)
+
+# Game profiles (games/<id>/profile.cpp) against games/<id>/expected_xex.json.
+gow2_add_test(game_profile_test game_profile_test.cpp)
+target_link_libraries(game_profile_test PRIVATE gow2_game)
+target_compile_definitions(game_profile_test PRIVATE GAME_EXPECTED_SHA256="${_expected_sha256}")
+file(READ "${CMAKE_SOURCE_DIR}/games/gow3/expected_xex.json" _gow3_expected_json)
+string(JSON _gow3_expected_sha256 GET "${_gow3_expected_json}" image_sha256)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/games/gow3/expected_xex.json")
+gow2_add_test(game_profile_gow3_test game_profile_test.cpp xdvdfs_builder.cpp)
+target_link_libraries(game_profile_gow3_test PRIVATE gow3_game gow2_launcher)
+target_compile_definitions(game_profile_gow3_test PRIVATE GOW3_PROFILE GAME_EXPECTED_SHA256="${_gow3_expected_sha256}")
+target_include_directories(game_profile_gow3_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+# "real ISO gow3" (extracts the real GoW3 disc, GOW3_ISO; skipped without it): long suite, label `lungo`.
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/game_profile_gow3_labels.cmake"
+    "set_tests_properties(\"real ISO gow3\" PROPERTIES LABELS lungo)
+")
+set_property(DIRECTORY APPEND PROPERTY TEST_INCLUDE_FILES
+    "${CMAKE_CURRENT_BINARY_DIR}/game_profile_gow3_labels.cmake")
 
 # launcher::CheckIso (ISO validation before extraction).
 gow2_add_test(game_setup_test game_setup_test.cpp xdvdfs_builder.cpp)
@@ -165,10 +184,16 @@ gow2_add_test(settings_test settings_test.cpp)
 target_link_libraries(settings_test PRIVATE gow2_runtime)
 # Game patches (runtime/game_patches): table, verification at startup on fake memory.
 gow2_add_test(game_patches_test game_patches_test.cpp)
-target_link_libraries(game_patches_test PRIVATE gow2_runtime XenonUtils)
+target_link_libraries(game_patches_test PRIVATE gow2_game gow2_runtime XenonUtils)
+# Game without patches or [engine]: fixture table and profile in place of gow2_game.
+gow2_add_test(unavailable_patches_test unavailable_patches_test.cpp fixtures/unavailable_patches.cpp)
+target_link_libraries(unavailable_patches_test PRIVATE gow2_launcher)
+# gears.exe model (runtime/dispatcher): game exes next to it.
+gow2_add_test(dispatcher_model_test dispatcher_model_test.cpp)
+target_link_libraries(dispatcher_model_test PRIVATE gow2_dispatcher_model)
 # Launcher: model, ImGui panel without a backend, Win32 + D3D11 window (WARP if the GPU is missing).
 gow2_add_test(launcher_test launcher_test.cpp)
-target_link_libraries(launcher_test PRIVATE gow2_launcher gow2_gpu)
+target_link_libraries(launcher_test PRIVATE gow2_launcher gow2_gpu gow2_game)
 # NVIDIA DLSS runtime DLL download (runtime/launcher/nvidia_dlls): fake Fetch, no network.
 gow2_add_test(nvidia_dlls_test nvidia_dlls_test.cpp)
 target_link_libraries(nvidia_dlls_test PRIVATE gow2_launcher)
@@ -194,24 +219,32 @@ target_link_libraries(sdl_gamepads_test PRIVATE gow2_runtime)
 gow2_add_test(screenshot_test gpu/screenshot_test.cpp)
 target_include_directories(screenshot_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(screenshot_test PRIVATE gow2_gpu gow2_runtime)
+# Shader capture without a GPU: folder, frame list, session (gow2_gpu).
+gow2_add_test(shader_capture_test gpu/shader_capture_test.cpp)
+target_include_directories(shader_capture_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(shader_capture_test PRIVATE gow2_gpu gow2_runtime)
+# PNG writer (WIC) and write queue of the shader capture (gow2_gpu).
+gow2_add_test(png_writer_test gpu/png_writer_test.cpp)
+target_include_directories(png_writer_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(png_writer_test PRIVATE gow2_gpu gow2_runtime)
 # Registry of the replacement shaders and layout check (CPU only;
 # shader_overrides.cpp is in gow2_gpu_d3d12 because it includes Xenia).
 gow2_add_test(shader_overrides_test gpu/shader_overrides_test.cpp)
-target_link_libraries(shader_overrides_test PRIVATE gow2_gpu_d3d12 gow2_runtime)
+target_link_libraries(shader_overrides_test PRIVATE gow2_gpu_d3d12 gow2_runtime gow2_game)
 # DXGI presenter (gow2_gpu_d3d12) on an invisible window. SKIP without a
 # hardware D3D12 adapter.
 gow2_add_test(presenter_test gpu/presenter_test.cpp)
 target_include_directories(presenter_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(presenter_test PRIVATE gow2_gpu_d3d12 gow2_runtime)
+target_link_libraries(presenter_test PRIVATE gow2_gpu_d3d12 gow2_runtime gow2_game)
 # --gpu d3d12 backend (gow2_gpu_d3d12): Xenia's D3D12CommandProcessor on the
 # guest ring, presenter on an invisible window. SKIP without a hardware
 # D3D12 adapter.
 # The child loses the device (RemoveDevice) and exits with 5: without Catch2.
 add_executable(d3d12_device_removed_child gpu/d3d12_device_removed_child.cpp)
-target_link_libraries(d3d12_device_removed_child PRIVATE gow2_gpu_d3d12 gow2_gpu gow2_kernel gow2_runtime)
+target_link_libraries(d3d12_device_removed_child PRIVATE gow2_gpu_d3d12 gow2_gpu gow2_kernel gow2_runtime gow2_game)
 gow2_add_test(d3d12_backend_test gpu/d3d12_backend_test.cpp)
 target_include_directories(d3d12_backend_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(d3d12_backend_test PRIVATE gow2_gpu_d3d12 gow2_gpu gow2_kernel gow2_runtime)
+target_link_libraries(d3d12_backend_test PRIVATE gow2_gpu_d3d12 gow2_gpu gow2_kernel gow2_runtime gow2_game)
 add_dependencies(d3d12_backend_test d3d12_device_removed_child)
 target_compile_definitions(d3d12_backend_test PRIVATE
     GOW2_D3D12_DEVICE_REMOVED_CHILD="$<TARGET_FILE:d3d12_device_removed_child>")
@@ -220,23 +253,23 @@ target_compile_definitions(d3d12_backend_test PRIVATE
 # hardware D3D12 adapter; rov also without ROV.
 gow2_add_test(d3d12_edram_test gpu/d3d12_edram_test.cpp)
 target_include_directories(d3d12_edram_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(d3d12_edram_test PRIVATE gow2_gpu_d3d12 gow2_gpu gow2_kernel gow2_runtime)
+target_link_libraries(d3d12_edram_test PRIVATE gow2_gpu_d3d12 gow2_gpu gow2_kernel gow2_runtime gow2_game)
 gow2_add_test(d3d12_draw_test gpu/d3d12_draw_test.cpp)
 target_include_directories(d3d12_draw_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(d3d12_draw_test PRIVATE gow2_gpu_d3d12 gow2_gpu gow2_kernel gow2_runtime)
+target_link_libraries(d3d12_draw_test PRIVATE gow2_gpu_d3d12 gow2_gpu gow2_kernel gow2_runtime gow2_game)
 gow2_add_test(d3d12_texture_test gpu/d3d12_texture_test.cpp)
 target_include_directories(d3d12_texture_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(d3d12_texture_test PRIVATE gow2_gpu_d3d12 gow2_gpu gow2_kernel gow2_runtime)
+target_link_libraries(d3d12_texture_test PRIVATE gow2_gpu_d3d12 gow2_gpu gow2_kernel gow2_runtime gow2_game)
 # MSAA 2x sample positions like the console (patch 0009): 2x depth from
 # sample 0 at the pixel center, with the 2x draws' viewport shifted by -0.5 px in y.
 gow2_add_test(d3d12_msaa_test gpu/d3d12_msaa_test.cpp)
 target_include_directories(d3d12_msaa_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(d3d12_msaa_test PRIVATE gow2_gpu_d3d12 gow2_gpu gow2_kernel gow2_runtime)
+target_link_libraries(d3d12_msaa_test PRIVATE gow2_gpu_d3d12 gow2_gpu gow2_kernel gow2_runtime gow2_game)
 # Replacement shaders (Xenia hook, patch 0010): fxc's DOF downsample
 # against the CPU formula, on a synthetic guest shader with the same layout.
 gow2_add_test(d3d12_shader_override_test gpu/d3d12_shader_override_test.cpp)
 target_include_directories(d3d12_shader_override_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(d3d12_shader_override_test PRIVATE gow2_gpu_d3d12 gow2_gpu gow2_kernel gow2_runtime)
+target_link_libraries(d3d12_shader_override_test PRIVATE gow2_gpu_d3d12 gow2_gpu gow2_kernel gow2_runtime gow2_game)
 # Physical page watching (runtime/physical_watch) with the vectored
 # write handler; the unwatched crash runs in a child process
 # without Catch2.

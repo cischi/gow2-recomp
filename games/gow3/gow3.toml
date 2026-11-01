@@ -1,0 +1,159 @@
+# XenonRecomp configuration for Gears of War 3 (default.xex, base 0x82000000).
+# XenonRecomp resolves relative paths against the folder of this file.
+
+[main]
+file_path = "../../game_data_gow3/default.xex"
+out_directory_path = "../../build/generated_gow3"
+switch_table_file_path = "gow3_switch_tables.toml"
+
+skip_lr = false
+skip_msr = false
+ctr_as_local = false
+xer_as_local = false
+reserved_as_local = false
+cr_as_local = false
+non_argument_as_local = false
+non_volatile_as_local = false
+
+# Register save/restore helpers: output of
+#   python tools/find_helpers.py build/xex_gow3/image.bin build/xex_gow3/info.json
+savegprlr_14_address = 0x82CC98C0
+restgprlr_14_address = 0x82CC9910
+savefpr_14_address = 0x82CCA180
+restfpr_14_address = 0x82CCA1CC
+savevmx_14_address = 0x82CCA280
+restvmx_14_address = 0x82CCA518
+savevmx_64_address = 0x82CCA314
+restvmx_64_address = 0x82CCA5AC
+
+# CRT setjmp/longjmp: the same instruction sequences as in GoW2 (see gow2.toml).
+# setjmp: lis r4,... / lwz r0,... / cmpwi / mtctr / bnectr / mflr r0 / mfcr r4 / stfd f14,0(r3) ...
+# longjmp: mflr r0 / stwu r1,-80(r1) ... / lfd f14,0(r7) ... / lwz r5,308(r7) / mtlr r5 / ld r1,144(r7) / mr r3,r6 / blr
+setjmp_address = 0x82CCC710
+longjmp_address = 0x82CCC3F0
+
+# Data (not code) to skip in the linear scan of .text: the 8 bytes (handler pointer +
+# scope data) before every function with exception handling, as in gow2.toml.
+# Found as the words at .pdata start - 8 that point into executable code while the
+# following word points into data; each appears in .text only there (131 + 55 + 1 times).
+invalid_instructions = [
+    { data = 0x82CCCE00, size = 8 }, # C++ handler (__CxxFrameHandler) + scope table
+    { data = 0x82FC880C, size = 8 }, # __C_specific_handler thunk (xboxkrnl, ordinal 421) + scope table
+    { data = 0x82CDB060, size = 8 }, # third handler, a single use (points at its own function end, scope 0), as 0x82CD7F80 in GoW2
+]
+
+# Function boundaries corrected by hand, as in gow2.toml (recursive descent with
+# function_end() of tools/find_missing_functions.py, following the switches of
+# gow3_switch_tables.toml), for the functions the recompile log reported:
+# 1) functions without .pdata with a switch: Function::Analyze closes the function at the
+#    bctr ("Switch case ... is trying to jump outside function");
+# 2) unoptimized code with dead b instructions: the function is truncated and the
+#    following b becomes an unresolved call ("// ERROR <addr>" in the generated C++);
+# 3) a function whose conditional branches jump past the end found by the analysis:
+#    the C++ does not compile ("use of undeclared label").
+functions = [
+    { address = 0x823AC230, size = 0xFC }, # switch loaded at 0x823AC238: the function ends (exclusive) at 0x823AC32C
+    { address = 0x824167F8, size = 0x160 }, # switch loaded at 0x82416804: the function ends (exclusive) at 0x82416958
+    { address = 0x826F2030, size = 0x140 }, # switch loaded at 0x826F203C: the function ends (exclusive) at 0x826F2170
+    { address = 0x829619F0, size = 0xE0 }, # switch loaded at 0x82961A1C: the function ends (exclusive) at 0x82961AD0
+    { address = 0x8297CCF0, size = 0x25C }, # switch loaded at 0x8297CD18: the function ends (exclusive) at 0x8297CF4C
+    { address = 0x829C7B28, size = 0x180 }, # switch loaded at 0x829C7C5C: the function ends (exclusive) at 0x829C7CA8
+    { address = 0x82CACC58, size = 0x48 }, # Function::Analyze closes the function at the first unconditional b whose following branches it does not follow (unoptimized code with dead b instructions); real end at the blr at 0x82CACC9C
+    { address = 0x82CACD40, size = 0x64 }, # Function::Analyze closes the function at the first unconditional b whose following branches it does not follow (unoptimized code with dead b instructions); real end at the blr at 0x82CACDA0
+    { address = 0x82D2D300, size = 0x270 }, # switch loaded at 0x82D2D32C: the function ends (exclusive) at 0x82D2D570
+    { address = 0x82D381E8, size = 0x44 }, # assembly without .pdata: Function::Analyze stops before the targets of the bdzf at 0x82D38200-0x82D3820C (undeclared labels in the C++); real end at the blr at 0x82D38228
+    { address = 0x82D38230, size = 0x44 }, # the same shape as 0x82D381E8 (bdzf at 0x82D38248-0x82D38254); real end at the blr at 0x82D38270
+    { address = 0x82D67E40, size = 0x260 }, # switch loaded at 0x82D67F28: the function ends (exclusive) at 0x82D680A0
+    { address = 0x82E0F418, size = 0x110 }, # switch loaded at 0x82E0F420: the function ends (exclusive) at 0x82E0F528
+]
+
+# Game patches (runtime/game_patches, games/gow3/patches.cpp): hooks before the instruction; true = the
+# original instruction is skipped (the register takes the patch's value). Addresses from the xenia-canary
+# game-patches file of the disc default.xex, each checked against image.bin (see patches.cpp).
+[[midasm_hook]]
+name = "Gow3PatchMotionBlur1" # lwz r11,0x38(r10)
+address = 0x82430640
+registers = ["r11"]
+jump_address_on_true = 0x82430644
+
+[[midasm_hook]]
+name = "Gow3PatchMotionBlur2" # lwz r11,0x80(r10)
+address = 0x827A2BCC
+registers = ["r11"]
+jump_address_on_true = 0x827A2BD0
+
+[[midasm_hook]]
+name = "Gow3PatchLensFlares" # lwz r10,0x60(r11)
+address = 0x82861FD0
+registers = ["r10"]
+jump_address_on_true = 0x82861FD4
+
+[[midasm_hook]]
+name = "Gow3PatchBloom" # lwz r10,0x48(r11)
+address = 0x82593DC0
+registers = ["r10"]
+jump_address_on_true = 0x82593DC4
+
+# Frame rate (internal patches frame_rate.interval and frame_rate.unlock, from [game] frame_rate).
+[[midasm_hook]]
+name = "Gow3PatchPresentInterval" # li r11,2
+address = 0x82AF66BC
+registers = ["r11"]
+jump_address_on_true = 0x82AF66C0
+
+[[midasm_hook]]
+name = "Gow3PatchUnlockFps" # lfs f1,0x4C8(r3)
+address = 0x8253D9B0
+registers = ["f1"]
+jump_address_on_true = 0x8253D9B4
+
+# Engine configuration (internal patch coalesced.no_hash_check, from [engine]): the sites of GoW2's patch,
+# found in this image by instruction pattern (see patches.cpp).
+[[midasm_hook]]
+name = "Gow3PatchCoalescedHash1" # li r3,1 (HashSec module section found)
+address = 0x82CE5D1C
+registers = ["r3"]
+jump_address_on_true = 0x82CE5D20
+
+[[midasm_hook]]
+name = "Gow3PatchCoalescedHash2" # mflr r12, first instruction of the I/O failure handler: true = blr
+address = 0x8295B4D0
+registers = []
+return_on_true = true
+
+# Aspect ratio (internal patches, [video] aspect).
+[[midasm_hook]]
+name = "Gow3PatchNoConstrainAspect" # beq cr6,0x8261BEF0: true = always jump (common to 21:9 and 16:10)
+address = 0x8261BE60
+registers = []
+jump_address_on_true = 0x8261BEF0
+
+[[midasm_hook]]
+name = "Gow3PatchUwFov" # lfs f0,0x630(r27): f0 from the tangent, f31 = FOV in degrees
+address = 0x8261BEF0
+registers = ["f0", "f31"]
+jump_address_on_true = 0x8261BEF4
+
+[[midasm_hook]]
+name = "Gow3PatchWidthReference" # lfs f0,0x898(r20) = 720.0: 800.0 at 16:10 (width = 1.6 x 800)
+address = 0x82960C6C
+registers = ["f0"]
+jump_address_on_true = 0x82960C70
+
+[[midasm_hook]]
+name = "Gow3PatchSceneHeight" # li r11,720: 550 at 21:9, 800 at 16:10 (common to both entries)
+address = 0x82960C78
+registers = ["r11"]
+jump_address_on_true = 0x82960C7C
+
+[[midasm_hook]]
+name = "Gow3PatchUwBufferHeight" # lwz r30,0x242C(r9): the scene buffers stay 720 rows at 21:9
+address = 0x827C583C
+registers = ["r30"]
+jump_address_on_true = 0x827C5840
+
+[[midasm_hook]]
+name = "Gow3PatchUwUiScaleMode" # stw r4,0x88(r3): 21:9 skips the store
+address = 0x82BC9D84
+registers = []
+jump_address_on_true = 0x82BC9D88

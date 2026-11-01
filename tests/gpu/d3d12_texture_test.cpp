@@ -73,6 +73,7 @@ namespace xenos = xe::gpu::xenos;
 
 constexpr uint32_t kSize = 64;
 constexpr uint32_t kBytes = kSize * kSize * 4;
+constexpr uint32_t kHalf = kSize / 2;
 constexpr uint32_t kSentinel = 0xDEADBEEF;
 constexpr uint32_t kCheckerA = 0xFF102030;
 constexpr uint32_t kCheckerB = 0xFFC0D0E0;
@@ -216,6 +217,40 @@ class TextureFixture {
     CHECK(after.skipped == 0);
   }
 
+  // Half-resolution draw: 32x32 rectangle with texcoord 0...1 over the 64x64 texture, so every pixel
+  // center (x + 0.5) / 32 is exactly on the boundary between texels 2x and 2x + 1; resolve 32x32 toward dest(i).
+  void DrawHalfAndResolve(const std::array<uint32_t, 6>& fetch, const std::vector<uint32_t>& ps, int i) {
+    const uint32_t half_vertices = vertices_ + 0x800;
+    const float s = float(kHalf);
+    const uint32_t v[kVertexDwords] = {F(0.f), F(0.f), F(0.f), F(0.f), F(0.f), F(s),   F(0.f), F(0.f),
+                                       F(1.f), F(0.f), F(s),   F(s),   F(0.f), F(1.f), F(1.f)};
+    for (uint32_t k = 0; k < kVertexDwords; ++k) D3D12Harness::Put32(half_vertices + k * 4, v[k]);
+    Pm4Builder p(resolve_vertices_ + resolve_slot_++ * 0x100);
+    p.SetSurface(kHalf, gow2_test::kMsaa1X, gow2_test::kColorRt8888, 0)
+        .ScreenSpaceDrawState()
+        .ImLoadImmediate(gow2_test::kShaderVertex, ub::VsPositionTexcoord(kVertexFetch))
+        .ImLoadImmediate(gow2_test::kShaderPixel, ps)
+        .TextureFetch(0, fetch)
+        .VertexFetch(kVertexFetch, half_vertices, kVertexDwords)
+        .DrawIndx2Auto(gow2_test::kPrimRectangleList, 3);
+    p.ResolveRect(0, 0, kHalf, kHalf).Resolve(dest_[i], kHalf, kHalf, gow2_test::kEndian8in32, 0, false);
+    REQUIRE(h_.Run(p, 10000ms));
+    CHECK(D3D12Harness::SummaryValue("gpu_draws_skipped") == 0);
+  }
+
+  // Compares the kHalf x kHalf resolved texels with expected(x, y).
+  void CheckHalfTexels(int i, const std::function<uint32_t(uint32_t, uint32_t)>& expected) {
+    uint32_t bad = 0, first_x = 0, first_y = 0, first_got = 0, first_want = 0;
+    for (uint32_t y = 0; y < kHalf; ++y)
+      for (uint32_t x = 0; x < kHalf; ++x) {
+        const uint32_t got = D3D12Harness::Get32(dest_[i] + TiledOffset(x, y, kHalf, 2));
+        if (got != expected(x, y) && !bad++) first_x = x, first_y = y, first_got = got, first_want = expected(x, y);
+      }
+    INFO("dest " << i << ": " << bad << " different texels; the first (" << first_x << "," << first_y << ") = 0x" << std::hex
+                 << first_got << ", expected 0x" << first_want);
+    CHECK(bad == 0);
+  }
+
   // Compares the 4096 resolved texels (tiled offsets of the destination, big-endian
   // logical DWORD) with expected(x, y), channel by channel within tolerance.
   void CheckTexels(int i, const std::function<uint32_t(uint32_t, uint32_t)>& expected, int tolerance = 0) {
@@ -300,5 +335,32 @@ TEST_CASE("d3d12_texture: the CPU rewrites the texture, the next draw is not sta
 
   f.DrawAndResolve(fetch, 1);
   f.CheckTexels(1, [](uint32_t x, uint32_t y) { return Checker(x, y, true); });
+  f.CheckLogClean();
+}
+
+// GoW3 builds its half-resolution occlusion query depth with a depth-writing pass whose point-sampled 2x2 fetches
+// land exactly on texel boundaries; the console takes the upper-left texel there (the 2x2 footprint the half-res
+// pixel covers, so the min is conservative). With the right/lower one the floors' query boxes fail by a fraction
+// of a pixel against the floors themselves and the floors flash.
+TEST_CASE("d3d12_texture: a depth-writing pass point-samples the upper-left texel on exact texel boundaries",
+          "[d3d12_texture]") {
+  if (!HasHardwareAdapter()) SKIP("no hardware D3D12 adapter");
+  TextureFixture f;
+  PutUnique(f.texture());
+  f.DrawHalfAndResolve(TextureFetchConstant(f.texture(), xenos::TextureFormat::k_8_8_8_8, xenos::Endian::k8in32),
+                       ub::PsTexture2DWritingDepth(), 0);
+  f.CheckHalfTexels(0, [](uint32_t x, uint32_t y) { return Unique(2 * x, 2 * y); });
+  f.CheckLogClean();
+}
+
+// Color passes keep Xenia's right/lower texel on exact boundaries (kTextureCoordEpsilon).
+TEST_CASE("d3d12_texture: a color pass point-samples the lower-right texel on exact texel boundaries",
+          "[d3d12_texture]") {
+  if (!HasHardwareAdapter()) SKIP("no hardware D3D12 adapter");
+  TextureFixture f;
+  PutUnique(f.texture());
+  f.DrawHalfAndResolve(TextureFetchConstant(f.texture(), xenos::TextureFormat::k_8_8_8_8, xenos::Endian::k8in32),
+                       ub::PsTexture2D(), 0);
+  f.CheckHalfTexels(0, [](uint32_t x, uint32_t y) { return Unique(2 * x + 1, 2 * y + 1); });
   f.CheckLogClean();
 }

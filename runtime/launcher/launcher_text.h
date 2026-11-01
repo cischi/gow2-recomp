@@ -64,7 +64,10 @@ struct UiText {
   const char *console, *console_tip, *field_console;
   // NVIDIA DLSS runtime download (section "Image").
   const char *dlss_download, *dlss_downloading, *dlss_download_note, *dlss_download_done;
+  // Tooltip of the rows disabled by UnavailableOptions; HDR has its own reason.
+  const char *not_available, *hdr_not_in_game;
 };
+// {game}, {edition} and {exe} in the texts are filled from game_profile::Get() (name, edition, id + ".exe").
 const UiText& Text(UiLanguage);
 
 // Fields that take effect only from the next launch (RestartNeeded), in this order.

@@ -23,8 +23,15 @@ void LogImport(const char* name, const PPCContext& ctx);
 // First and last+1 of the guest area of the function table read by
 // PPC_LOOKUP_FUNC: PPC_IMAGE_BASE + PPC_IMAGE_SIZE, 8 bytes (a host pointer)
 // per 4 bytes of code from PPC_CODE_BASE.
+// The table goes on past the code for kExtraFunctions guest addresses from
+// kExtraFunctionBase: host functions the title only reaches through a pointer
+// (kernel exports resolved at run time, InstallExtraFunction). 256 entries add
+// only 2 KiB, which usually fits in the 64 KiB rounding of the heap start.
 inline constexpr uint64_t kFunctionTableBegin = PPC_IMAGE_BASE + PPC_IMAGE_SIZE;
-inline constexpr uint64_t kFunctionTableEnd = kFunctionTableBegin + PPC_CODE_SIZE * 2;
+inline constexpr uint64_t kExtraFunctionBase = (PPC_CODE_BASE + PPC_CODE_SIZE + 3) & ~uint64_t(3);
+inline constexpr uint64_t kExtraFunctions = 256;
+inline constexpr uint64_t kFunctionTableEnd =
+    kFunctionTableBegin + (kExtraFunctionBase + kExtraFunctions * 4 - PPC_CODE_BASE) * 2;
 
 struct FunctionTableStats {
   uint32_t installed;  // functions written to the table
@@ -38,5 +45,9 @@ struct FunctionTableStats {
 std::expected<FunctionTableStats, std::string> InstallFunctionTable(uint8_t* base);
 
 // Host function of the function table for a guest address (nullptr if
-// outside the code or not mapped).
+// outside the code and the extra functions, or not mapped).
 PPCFunc* LookupFunction(uint8_t* base, uint32_t guest);
+
+// Gives `func` the next free extra guest address and writes its table entry;
+// 0 when the kExtraFunctions are used up.
+uint32_t InstallExtraFunction(uint8_t* base, PPCFunc* func);

@@ -9,8 +9,11 @@
 #include <cstdio>
 #include <cstring>
 #include <mutex>
+#include <set>
+#include <map>
 #include <string_view>
 #include <thread>
+#include <unordered_map>
 
 #include "imports.h"
 #include "kernel/guest.h"
@@ -18,6 +21,7 @@
 #include "kernel/registry.h"
 #include "log.h"
 #include "platform/platform.h"
+#include "xex_check.h"
 
 namespace kernel::module {
 namespace {
@@ -26,12 +30,19 @@ constexpr uint32_t kErrorSuccess = 0;
 constexpr uint32_t kErrorNotFound = 0x490;  // X_ERROR_NOT_FOUND
 constexpr uint32_t kStatusInvalidHandle = 0xC0000008;
 constexpr uint32_t kStatusNotFound = 0xC0000225;
+constexpr uint32_t kStatusObjectNameNotFound = 0xC0000034;
+constexpr uint32_t kStatusEntrypointNotFound = 0xC0000263;  // X_STATUS_DRIVER_ENTRYPOINT_NOT_FOUND
 
 std::mutex g_mutex;
 uint32_t g_hmodule = 0;
 uint32_t g_header = 0;
 uint32_t g_header_size = 0;
 std::string g_name;
+
+// Kernel modules: lowercase name -> LDR (zeroed, allocated on first use).
+std::map<std::string, uint32_t> g_kernel_modules;
+ProcedureInstaller g_installer = nullptr;
+std::unordered_map<HostFunction*, uint32_t> g_procedures;  // installed exports -> guest address
 
 std::atomic<bool> g_stamp_run{false};
 std::thread g_stamp_thread;
@@ -48,6 +59,35 @@ bool EqualNoCase(std::string_view a, std::string_view b) {
   return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin(), [](char x, char y) {
            return std::tolower(static_cast<unsigned char>(x)) == std::tolower(static_cast<unsigned char>(y));
          });
+}
+
+std::string Lower(std::string_view s) {
+  std::string r(s);
+  for (char& c : r) c = char(std::tolower(static_cast<unsigned char>(c)));
+  return r;
+}
+
+// Xenia: KernelModule (kernel_module.cc), one per built-in module. hmodule of
+// the kernel module `name`, 0 if the name is not one. Called with g_mutex held.
+uint32_t KernelModuleLocked(const char* name) {
+  if (!name) return 0;
+  std::string key = Lower(name);
+  if (key == "xam") key = "xam.xex";
+  if (key == "xboxkrnl") key = "xboxkrnl.exe";
+  if (key != "xam.xex" && key != "xboxkrnl.exe") return 0;
+  uint32_t& ldr = g_kernel_modules[key];
+  if (!ldr) {
+    if (MemorySystem* m = Memory()) ldr = m->heap.Alloc(kLdrSize);
+    if (ldr) std::memset(GuestPtr<uint8_t>(ldr), 0, kLdrSize);
+  }
+  return ldr;
+}
+
+// Name of the kernel module with this hmodule, empty if none. g_mutex held.
+std::string KernelModuleNameLocked(uint32_t hmodule) {
+  for (const auto& [name, ldr] : g_kernel_modules)
+    if (hmodule && ldr == hmodule) return name;
+  return {};
 }
 
 // Xenia: XexModule::GetOptHeader(header, key, out) (cpu/xex_module.cc) on a
@@ -102,6 +142,12 @@ uint32_t ExecutableHandle() {
 uint32_t ExecutableHeader() {
   std::lock_guard lock(g_mutex);
   return g_header;
+}
+
+// Execution info: media id, version, base version, title id (+12), ...
+uint32_t ExecutableTitleId() {
+  const uint32_t info = OptHeaderField(ExecutableHeader(), 0x40006);
+  return info ? uint32_t(*P32(info + 12)) : 0;
 }
 
 // Xenia: XboxkrnlModule::XboxkrnlModule and KernelState::SetExecutableModule.
@@ -163,13 +209,14 @@ void StopKernelVariables() {
 namespace {
 
 // Xenia: XexGetModuleHandle_entry (xboxkrnl_modules.cc): null name = executable
-// module. Only the game's XEX has an LDR: for other names (kernel
-// modules) hmodule 0 and X_ERROR_NOT_FOUND, logged.
+// module; xam.xex and xboxkrnl.exe are the kernel modules; other names
+// hmodule 0 and X_ERROR_NOT_FOUND, logged.
 uint32_t XexGetModuleHandleImpl(const char* name, be<uint32_t>* out) {
   uint32_t hmodule = 0;
   {
     std::lock_guard lock(g_mutex);
     if (!name || EqualNoCase(name, g_name) || EqualNoCase(name, "default")) hmodule = g_hmodule;
+    if (!hmodule) hmodule = KernelModuleLocked(name);
   }
   if (out) *out = hmodule;
   if (!hmodule) {
@@ -209,17 +256,122 @@ uint32_t XexGetModuleSectionImpl(uint32_t hmodule, const char* name, be<uint32_t
   return kStatusNotFound;
 }
 
+// Xenia: XexLoadImage_entry (xboxkrnl_modules.cc). Loading the executable or a
+// kernel module returns its hmodule; any other XEX is reported missing, so the
+// title skips what it wanted from it.
+// shortcut: no second XEX is loaded; upgrade when a title ships one it needs.
+uint32_t XexLoadImageImpl(const char* name, uint32_t, uint32_t, be<uint32_t>* out) {
+  uint32_t hmodule = 0;
+  {
+    std::lock_guard lock(g_mutex);
+    if (name && (EqualNoCase(name, g_name) || EqualNoCase(name, "default.xex"))) hmodule = g_hmodule;
+    if (!hmodule) hmodule = KernelModuleLocked(name);
+  }
+  if (out) *out = hmodule;
+  if (!hmodule) {
+    LogLine(std::string("[kernel] XexLoadImage: module \"") + (name ? name : "(null)") + "\" not loadable");
+    return kStatusObjectNameNotFound;
+  }
+  return kErrorSuccess;
+}
+
+// Xenia: XexUnloadImage_entry. The executable stays loaded.
+uint32_t XexUnloadImageImpl(uint32_t hmodule) {
+  std::lock_guard lock(g_mutex);
+  const bool known = hmodule && (hmodule == g_hmodule || !KernelModuleNameLocked(hmodule).empty());
+  return known ? kErrorSuccess : kStatusInvalidHandle;
+}
+
+// Xenia: XexGetProcedureAddress_entry. hmodule 0 = executable. On a kernel
+// module the ordinal (or, from 0x10000, the address of a name) selects a
+// KERNEL_EXPORT, installed once at a guest address by the runtime's installer.
+// shortcut: the executable's export table is not read (titles do not export);
+// every ordinal or name of the executable is not found.
+uint32_t XexGetProcedureAddressImpl(uint32_t hmodule, uint32_t ordinal, be<uint32_t>* out) {
+  if (out) *out = 0;
+  std::lock_guard lock(g_mutex);
+  const std::string module = KernelModuleNameLocked(hmodule);
+  if (hmodule && hmodule != g_hmodule && module.empty()) {
+    LogLine("[kernel] XexGetProcedureAddress: unknown hmodule " + Hex(hmodule));
+    return kStatusInvalidHandle;
+  }
+  if (module.empty()) {
+    LogLine("[kernel] XexGetProcedureAddress: " + Hex(ordinal) + " not exported by the executable");
+    return kStatusEntrypointNotFound;
+  }
+  const char* by_name = ordinal >= 0x10000 ? GuestPtr<const char>(ordinal) : nullptr;
+  const std::string name = by_name ? std::string(by_name, strnlen(by_name, 256))  // export names are short
+                                   : xexcheck::ExportName(module, ordinal);
+  HostFunction* func = FindExport(name);
+  uint32_t address = 0;
+  if (func) {
+    uint32_t& slot = g_procedures[func];
+    if (!slot && g_installer) slot = g_installer(func);
+    address = slot;
+  }
+  static std::set<std::string> logged;  // titles look some exports up every frame
+  const bool first = logged.insert(module + " " + name).second;
+  if (!address) {
+    if (first)
+      LogLine("[kernel] XexGetProcedureAddress: " + module + " " + name + " not " +
+              (func ? "installable" : "implemented"));
+    return kStatusEntrypointNotFound;
+  }
+  if (out) *out = address;
+  if (first) LogLine("[kernel] XexGetProcedureAddress: " + module + " " + name + " -> " + Hex(address));
+  return kErrorSuccess;
+}
+
 // Xenia: RtlImageXexHeaderField_entry (xboxkrnl_rtl.cc).
 uint32_t RtlImageXexHeaderFieldImpl(uint32_t header, uint32_t key) { return OptHeaderField(header, key); }
+
+// Xenia: XamGetExecutionId_entry (xam_info.cc): address of the executable's
+// XEX_HEADER_EXECUTION_INFO (0x40006: media id, version, title id...).
+uint32_t XamGetExecutionIdImpl(be<uint32_t>* info) {
+  const uint32_t field = OptHeaderField(ExecutableHeader(), 0x40006);
+  if (!field) return kStatusNotFound;
+  if (info) *info = field;
+  return 0;
+}
 
 // Xenia: KeEnableFpuExceptions_entry (xboxkrnl_misc.cc): no effect (FPU
 // exceptions are not emulated).
 void KeEnableFpuExceptionsImpl(uint32_t) {}
 
 }  // namespace
+
+void SetProcedureInstaller(ProcedureInstaller installer) {
+  std::lock_guard lock(g_mutex);
+  g_installer = installer;
+  g_procedures.clear();
+}
+
 }  // namespace kernel::module
+
+namespace kernel {
+namespace {
+std::unordered_map<std::string_view, PPCFunc*>& Exports() {
+  static std::unordered_map<std::string_view, PPCFunc*> exports;  // names are string literals
+  return exports;
+}
+}  // namespace
+
+bool RegisterExport(const char* name, PPCFunc* func) {
+  Exports()[name] = func;
+  return true;
+}
+
+PPCFunc* FindExport(std::string_view name) {
+  const auto it = Exports().find(name);
+  return it == Exports().end() ? nullptr : it->second;
+}
+}  // namespace kernel
 
 KERNEL_EXPORT(XexGetModuleHandle, kernel::module::XexGetModuleHandleImpl)
 KERNEL_EXPORT(XexGetModuleSection, kernel::module::XexGetModuleSectionImpl)
+KERNEL_EXPORT(XexLoadImage, kernel::module::XexLoadImageImpl)
+KERNEL_EXPORT(XexUnloadImage, kernel::module::XexUnloadImageImpl)
+KERNEL_EXPORT(XexGetProcedureAddress, kernel::module::XexGetProcedureAddressImpl)
 KERNEL_EXPORT(RtlImageXexHeaderField, kernel::module::RtlImageXexHeaderFieldImpl)
 KERNEL_EXPORT(KeEnableFpuExceptions, kernel::module::KeEnableFpuExceptionsImpl)
+KERNEL_EXPORT(XamGetExecutionId, kernel::module::XamGetExecutionIdImpl)

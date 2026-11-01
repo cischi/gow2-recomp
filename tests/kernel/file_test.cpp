@@ -439,6 +439,12 @@ TEST_CASE("file: size, position and attribute queries") {
   CHECK(Call(__imp__NtQueryInformationFile, {o.handle, iosb, info, 40, kFileBasicInformation}) == kStatusSuccess);
   CHECK(Get64(info + 0x10) > 0);  // LastWriteTime
 
+  // FileSectorInformation (26, read by the XDK's XGetFilePhysicalSortKey): a 4-byte sector
+  Put32(info, 0xFFFFFFFF);
+  CHECK(Call(__imp__NtQueryInformationFile, {o.handle, iosb, info, 4, 26}) == kStatusSuccess);
+  CHECK(Get32(iosb + 4) == 4);
+  CHECK(Get32(info) == 0);
+
   // position: set and re-read, then a read without offset from there
   Put64(info, 12);
   CHECK(Call(__imp__NtSetInformationFile, {o.handle, iosb, info, 8, kFilePositionInformation}) == kStatusSuccess);

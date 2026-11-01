@@ -3,6 +3,7 @@
 // (F1 overlay in game, gpu/overlay.h).
 #pragma once
 
+#include <set>
 #include <string>
 #include <vector>
 
@@ -46,6 +47,7 @@ struct LauncherState {
   bool extracting = false;      // extraction running on another thread
   float extract_progress = 0;   // 0..1
   std::string data_message;     // last ISO check / extraction outcome (already in the UI language)
+  std::set<std::string> unavailable;  // UnavailableOptions(): rows disabled, the file's value untouched
   bool overlay = false;    // Apply/Close buttons instead of Play/Quit
   float panel_w = 0, panel_h = 0;  // pixels; 0 = the whole viewport, otherwise a centered panel
 };

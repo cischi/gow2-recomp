@@ -116,3 +116,17 @@ TEST_CASE("screenshot: WritePpm10 rejects inconsistent dimensions and nonexisten
   CHECK_FALSE(gpu::WritePpm10(dir.path / "b.ppm", 0, 0, {}));
   CHECK_FALSE(gpu::WritePpm10(dir.path / "does not exist" / "c.ppm", 2, 2, px));
 }
+
+TEST_CASE("F12 screenshot: one folder per game, local time with milliseconds in the name") {
+  std::tm t{};
+  t.tm_year = 2026 - 1900;
+  t.tm_mon = 9;
+  t.tm_mday = 28;
+  t.tm_hour = 9;
+  t.tm_min = 5;
+  t.tm_sec = 7;
+  CHECK(gpu::HotkeyScreenshotPath("C:/games", "gow3", t, 42) ==
+        std::filesystem::path("C:/games") / "screenshots" / "gow3" / "gow3_2026-10-28_09-05-07-042.bmp");
+  CHECK(gpu::HotkeyScreenshotPath("C:/games", "gow2", t, 999).parent_path() ==
+        std::filesystem::path("C:/games") / "screenshots" / "gow2");
+}

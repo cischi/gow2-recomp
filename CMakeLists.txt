@@ -46,8 +46,8 @@ include(cmake/Catch2.cmake)
 include(cmake/XenonRecompPatches.cmake)
 add_subdirectory(thirdparty/XenonRecomp)
 add_subdirectory(common/xex_check)
-# `recompile` target (not in `all`), GOW2_GENERATED_SOURCES and the import
-# stubs: before runtime/, which derives the gow2 executable from them
+# Recompile targets per game (not in `all`), <ID>_GENERATED_SOURCES and the import
+# stubs: before runtime/, which derives the game executables from them
 include(cmake/Recompile.cmake)
 # Static SDL3 (thirdparty/SDL) for non-Xbox pads: SDL3::SDL3-static
 include(cmake/SDL.cmake)
@@ -60,6 +60,8 @@ include(cmake/FidelityFX.cmake)
 # DLSS bridge gow2_dlss.dll (only with GOW2_DLSS_SDK_DIR), gow2_copy_dlss: before runtime/
 include(cmake/Dlss.cmake)
 add_subdirectory(runtime)
+# Per-game profiles (games/<id>): gow2_game, gow3_game
+add_subdirectory(games)
 # Vendored Xenia GPU code (thirdparty/xenia) and shims: xenia_gpu_core
 include(cmake/XeniaGpu.cmake)
 # FFmpeg subset of xenia-canary (has207 fork, thirdparty/ffmpeg): xenia_ffmpeg

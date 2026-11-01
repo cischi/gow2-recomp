@@ -98,7 +98,15 @@ PPC_EXTERN_FUNC(__imp__XamVoiceCreate);
 PPC_EXTERN_FUNC(__imp__XMsgInProcessCall);
 PPC_EXTERN_FUNC(__imp__XMsgStartIORequest);
 PPC_EXTERN_FUNC(__imp__XMsgCancelIORequest);
+PPC_EXTERN_FUNC(__imp__XMsgCompleteIORequest);
+PPC_EXTERN_FUNC(__imp__XamGetOverlappedResult);
+PPC_EXTERN_FUNC(__imp__XamTaskSchedule);
+PPC_EXTERN_FUNC(__imp__XamTaskCloseHandle);
+PPC_EXTERN_FUNC(__imp__XamContentAggregateCreateEnumerator);
+PPC_EXTERN_FUNC(__imp__XamGetPrivateEnumStructureFromHandle);
 PPC_EXTERN_FUNC(__imp__XamVoiceHeadsetPresent);
+PPC_EXTERN_FUNC(__imp__XamVoiceIsActiveProcess);
+PPC_EXTERN_FUNC(__imp__XamUserGetDeviceContext);
 PPC_EXTERN_FUNC(__imp__NtCreateFile);
 PPC_EXTERN_FUNC(__imp__NtWriteFile);
 PPC_EXTERN_FUNC(__imp__NtClose);
@@ -157,8 +165,18 @@ PPC_FUNC(FnUiApc) {
   ctx.r3.u64 = 0;
 }
 
+// XamTaskSchedule task: completes g_task_overlapped like the XDK's XMsg tasks.
+constexpr uint32_t kFnTask = 0x82000120;
+std::atomic<uint32_t> g_task_overlapped{0}, g_task_message{0};
+PPC_FUNC(FnTask) {
+  g_task_message = ctx.r3.u32;
+  CallRegs(__imp__XMsgCompleteIORequest, {g_task_overlapped.load(), 0x80070012, 0x65B, 7});
+  ctx.r3.u64 = 0;
+}
+
 PPCFunc* ResolveFn(uint32_t guest) {
   switch (guest) {
+    case kFnTask: return &FnTask;
     case kFnUiApc: return &FnUiApc;
     case kFnRoutine: return &FnRoutine;
     default: return nullptr;
@@ -1027,6 +1045,20 @@ TEST_CASE("stub: voice without a device") {
   CHECK(Call(__imp__XamVoiceCreate, {0, 0xF, voice}) == kErrAccessDenied);
   CHECK(Get32(voice) == 0);
   CHECK(Call(__imp__XamVoiceHeadsetPresent, {0}) == 0);
+  CHECK(Call(__imp__XamVoiceIsActiveProcess, {}) == 0);
+}
+
+TEST_CASE("xam: XamUserGetDeviceContext zeroes the context, pad only for user 0 / 0xFF") {
+  Env& e = E();
+  const uint32_t ctx = e.Alloc(4);
+  for (uint32_t user : {0u, 0xFFu}) {
+    Put32(ctx, 0x1234);
+    CHECK(Call(__imp__XamUserGetDeviceContext, {user, 0, ctx}) == 0);
+    CHECK(Get32(ctx) == 0);
+  }
+  Put32(ctx, 0x1234);
+  CHECK(Call(__imp__XamUserGetDeviceContext, {1, 0, ctx}) == 0x48F);  // ERROR_DEVICE_NOT_CONNECTED
+  CHECK(Get32(ctx) == 0);
 }
 
 TEST_CASE("xam: XMsg to XLiveBase (0xFC) offline, other apps") {
@@ -1046,6 +1078,66 @@ TEST_CASE("xam: XMsg to XLiveBase (0xFC) offline, other apps") {
   CHECK(HandleGet(ev)->IsSignaled());
   CHECK(Call(__imp__XMsgStartIORequest, {0x77, 1, 0, buf, 4}) == 0x80070057);
   CHECK(Call(__imp__XMsgCancelIORequest, {ov, 1}) == 0);
+}
+
+TEST_CASE("xam: aggregate content enumerator through its X_KENUMERATOR and XAM's message 0x2000E") {
+  Env& e = E();
+  const uint32_t handle = e.Alloc(4), priv = e.Alloc(4);
+  CHECK(Call(__imp__XamContentAggregateCreateEnumerator, {0xE000000000000001ull, 1, 2, 0, 0}) == kEInvalidArg);
+  REQUIRE(Call(__imp__XamContentAggregateCreateEnumerator, {0xE000000000000001ull, 1, 2, 0, handle}) == 0);
+  CHECK(Call(__imp__XamGetPrivateEnumStructureFromHandle, {0x12345678, priv}) == 0xC0000008);
+  REQUIRE(Call(__imp__XamGetPrivateEnumStructureFromHandle, {Get32(handle), priv}) == 0);
+  const uint32_t k = Get32(priv);
+  CHECK(Get32(k) == 0xFE);           // app_id
+  CHECK(Get32(k + 4) == 0x2000E);    // open_message
+  CHECK(Get32(k + 8) == 0x20010);    // close_message
+  CHECK(Get32(k + 16) == 1);         // items_per_enumerate
+  CHECK(Get32(k + 24) == 0x58454E00);     // aggregate extra data: magic 'XEN\0'
+  CHECK(Get32(k + 28) == Get32(handle));  // and handle
+  // The title's enumerate request (XContentAggregate in the XDK libraries).
+  const uint32_t msg = e.Alloc(32), buf = e.Alloc(0x200), length = e.Alloc(4);
+  Put32(msg, Get32(k + 12));
+  Put32(msg + 8, k + 24);
+  Put32(msg + 12, buf);
+  Put32(msg + 16, 0x200);
+  Put32(msg + 20, 1);
+  Put32(msg + 24, length);
+  Put32(length, 0xFFFF);
+  CHECK(Call(__imp__XMsgInProcessCall, {Get32(k), Get32(k + 4), msg, 0}) == 0x80070012);  // no content
+  CHECK(Get32(length) == 0);
+  // The reference taken for the caller is dropped once.
+  CHECK(ObjectDereference(k));
+  CHECK_FALSE(ObjectDereference(k));
+  CHECK(Call(__imp__NtClose, {Get32(handle)}) == 0);
+}
+
+TEST_CASE("xam: XamTaskSchedule runs the task, XMsgCompleteIORequest wakes XamGetOverlappedResult") {
+  Env& e = E();
+  const uint32_t ev = NewEvent(), ov = NewOverlapped(ev), length = e.Alloc(4), thread = e.Alloc(4);
+  Put32(ov, kErrIoPending);
+  CHECK(Call(__imp__XamGetOverlappedResult, {NewOverlapped(), length, 1}) == 0xDEAD);  // already complete
+  const uint32_t pending = NewOverlapped();
+  Put32(pending, kErrIoPending);
+  CHECK(Call(__imp__XamGetOverlappedResult, {pending, length, 1}) == 0x3E4);  // no event: ERROR_IO_INCOMPLETE
+  g_task_overlapped = ov;
+  REQUIRE(Call(__imp__XamTaskSchedule, {kFnTask, 0x1234, 0, thread}) == 0);
+  CHECK(Get32(thread) != 0);
+  CHECK(Call(__imp__XamGetOverlappedResult, {ov, length, 1}) == 0x80070012);
+  CHECK(Get32(length) == 7);
+  CHECK(Get32(ov + 0x18) == 0x65B);
+  CHECK(g_task_message == 0x1234);
+  // XamTaskCloseHandle releases the last reference of the ended task: the
+  // thread object (and its guest stack) is destroyed.
+  std::weak_ptr<KernelObject> task = HandleGet(Get32(thread));
+  REQUIRE(!task.expired());
+  {
+    const std::shared_ptr<KernelObject> one[1] = {task.lock()};
+    REQUIRE(WaitAny(one, nullptr, false) == kStatusWait0);  // the task thread has ended
+  }
+  CHECK(Call(__imp__XamTaskCloseHandle, {Get32(thread)}) == 0);
+  for (int i = 0; i < 200 && !task.expired(); ++i) std::this_thread::sleep_for(5ms);
+  CHECK(task.expired());
+  CHECK(Call(__imp__XamTaskCloseHandle, {Get32(thread)}) == 0xC0000008);
 }
 
 TEST_CASE("xam: XMsg to XGI (0xFB) like Xenia's xgi_app.cc") {

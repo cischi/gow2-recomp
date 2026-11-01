@@ -1,4 +1,4 @@
-"""Checks xexdump on the real default.xex against config/expected_xex.json.
+"""Checks xexdump on the real default.xex against games/gow2/expected_xex.json.
 
 The expected values were derived independently of XenonUtils (XEX2 optional
 headers 0x00010100 and 0x000103FF).
@@ -17,7 +17,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 XEX = ROOT / "game_data" / "default.xex"
-EXPECTED = ROOT / "config" / "expected_xex.json"
+EXPECTED = ROOT / "games" / "gow2" / "expected_xex.json"
 
 
 def _xexdump_exe() -> Path:

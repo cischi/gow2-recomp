@@ -38,6 +38,14 @@ namespace gpu {
 
 enum class GPUSetting { ClearMemoryPageState, ReadbackMemexport };
 
+// gow2: ZPD observer (the runtime's shader capture), on the command processor
+// thread: retired false = EVENT_WRITE_ZPD queued, in command order; true = the
+// report's sample delta (guest samples), written to the guest. nullptr = no hook.
+using ZPDObserverHook = void (*)(bool retired, uint64_t handle,
+                                 uint32_t address, uint64_t z_pass,
+                                 uint64_t z_fail);
+void SetZPDObserverHook(ZPDObserverHook hook);
+
 enum class ReadbackResolveMode {
   kDisabled,  // No readback (none)
   kFast,      // Delayed sync, 1 frame behind (fast)

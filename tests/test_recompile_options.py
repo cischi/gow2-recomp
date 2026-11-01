@@ -56,7 +56,7 @@ def test_all_false_passes_the_check(tmp_path):
 
 
 def test_repository_config_passes_the_check():
-    text = (ROOT / "config" / "gow2.toml").read_text(encoding="utf-8")
+    text = (ROOT / "games" / "gow2" / "gow2.toml").read_text(encoding="utf-8")
     import re
     bad = re.findall(r"^\s*(skip_\w+|\w+_as_local)\s*=\s*true", text, re.MULTILINE)
     assert bad == []

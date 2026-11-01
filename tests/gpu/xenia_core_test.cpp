@@ -67,10 +67,11 @@ std::unique_ptr<DxbcShader> MakeShader(xenos::ShaderType type, const std::vector
   return shader;
 }
 
-std::vector<uint8_t> Translate(DxbcShader& shader) {
+std::vector<uint8_t> Translate(DxbcShader& shader, uint32_t resolution_scale = 1) {
   DxbcShaderTranslator translator(xe::ui::GraphicsProvider::GpuVendorID::kNvidia,
                                   /*bindless_resources_used=*/false,
-                                  /*edram_rov_used=*/false);
+                                  /*edram_rov_used=*/false, /*gamma_render_target_as_unorm8=*/false,
+                                  /*msaa_2x_supported=*/true, resolution_scale, resolution_scale);
   const uint64_t modification =
       shader.type() == xenos::ShaderType::kVertex
           ? translator.GetDefaultVertexShaderModification(shader.GetDynamicAddressableRegisterCount(0))
@@ -565,4 +566,56 @@ TEST_CASE("xenia_core: upscaler mip bias in the system constants", "[xenia_core]
   RequireDxbcContainer(vs_bin);
   const auto vs_flags = RdefVariableFlags(vs_bin, "xe_gow2_mip_bias");
   CHECK((!vs_flags || (*vs_flags & dxbc::kRdefVariableFlagUsed) == 0));
+}
+
+// Patch 0019: tfetch with offsets plus getWeights2D on the same fetch constant and coordinate register is a manual
+// bilinear filter (Gears of War 3's PCF); at resolution scale > 1 the offsets go in host texels (the literal 1/scale of
+// Xenia's scaled-offset path) and the weights in host texel fractions (the literal scale) even with
+// draw_resolution_scaled_texture_offsets false, as gow2 sets it. A tfetch with offsets alone (UE3's DOF downsample),
+// getWeights on another constant, or taps from another coordinate register (computed in ALU) keep upstream's guest grid.
+TEST_CASE("xenia_core: manual bilinear filter on the host grid at resolution scale 2 (patch 0019)", "[xenia_core]") {
+  REQUIRE(gow2::xenia::SetCvar("draw_resolution_scaled_texture_offsets", "false"));
+  struct CvarRestore {
+    ~CvarRestore() { gow2::xenia::SetCvar("draw_resolution_scaled_texture_offsets", "true"); }
+  } restore;
+  // tfetch2D r1, r0, tf0, offsets (1, -1); getWeights2D r2, r<weights_src>, tf<weights_constant>.
+  const auto pcf = [](uint32_t weights_constant, uint32_t weights_src) {
+    return ub::Assemble({ub::CfAlloc(ub::AllocType::kPsColors, 0),
+                         ub::CfExec(true, ub::FirstInstr(2), 3, ub::Seq({ub::kSeqFetch, ub::kSeqFetch, ub::kSeqAluSerialize}))},
+                        {ub::TextureFetch2D(1, 0, 0, 1, -1), ub::TextureWeights2D(2, weights_src, weights_constant),
+                         ub::AluExportMov(ub::ExportRegister::kPSColor0, ub::R(1))});
+  };
+  const auto offsets_only = [] {
+    return ub::Assemble({ub::CfAlloc(ub::AllocType::kPsColors, 0),
+                         ub::CfExec(true, ub::FirstInstr(2), 2, ub::Seq({ub::kSeqFetch, ub::kSeqAluSerialize}))},
+                        {ub::TextureFetch2D(1, 0, 0, 1, -1), ub::AluExportMov(ub::ExportRegister::kPSColor0, ub::R(1))});
+  };
+  // Immediate float4 operands in the DXBC instruction stream (components outside the XY write mask are 0).
+  const auto has_literal = [](const std::vector<uint8_t>& bin, float x, float y) {
+    const float v[4] = {x, y, 0.0f, 0.0f};
+    return std::search(bin.begin(), bin.end(), reinterpret_cast<const uint8_t*>(v),
+                       reinterpret_cast<const uint8_t*>(v) + sizeof(v)) != bin.end();
+  };
+  auto ps = MakeShader(xenos::ShaderType::kPixel, pcf(0, 0));
+  REQUIRE(ps->is_ucode_analyzed());
+  REQUIRE(ps->texture_bindings().size() == 2);
+  const auto scaled = Translate(*ps, 2);
+  RequireDxbcContainer(scaled);
+  CHECK(has_literal(scaled, 0.5f, 0.5f));  // offsets / scale
+  CHECK(has_literal(scaled, 2.0f, 2.0f));  // weights * scale
+  const auto native = Translate(*MakeShader(xenos::ShaderType::kPixel, pcf(0, 0)), 1);
+  RequireDxbcContainer(native);
+  CHECK(!has_literal(native, 2.0f, 2.0f));
+  const auto plain = Translate(*MakeShader(xenos::ShaderType::kPixel, offsets_only()), 2);
+  RequireDxbcContainer(plain);
+  CHECK(!has_literal(plain, 0.5f, 0.5f));
+  CHECK(!has_literal(plain, 2.0f, 2.0f));
+  const auto other_constant = Translate(*MakeShader(xenos::ShaderType::kPixel, pcf(1, 0)), 2);
+  RequireDxbcContainer(other_constant);
+  CHECK(!has_literal(other_constant, 0.5f, 0.5f));
+  CHECK(!has_literal(other_constant, 2.0f, 2.0f));
+  const auto alu_taps = Translate(*MakeShader(xenos::ShaderType::kPixel, pcf(0, 3)), 2);
+  RequireDxbcContainer(alu_taps);
+  CHECK(!has_literal(alu_taps, 0.5f, 0.5f));
+  CHECK(!has_literal(alu_taps, 2.0f, 2.0f));
 }

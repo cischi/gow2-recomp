@@ -42,7 +42,8 @@ Bytes KV(std::u16string_view k, std::u16string_view v) { return Cat({W(k), W(v)}
 constexpr std::u16string_view kTuple =
     u"(MinLODSize=256,MaxLODSize=1024,LODBias=1,MinMagFilter=aniso,MipFilter=point)";
 
-Bytes Sample(bool with_dynamic = true, std::u16string_view tuple = kTuple) {
+Bytes Sample(bool with_dynamic = true, std::u16string_view tuple = kTuple,
+             std::u16string_view ini = u"..\\GearGame\\Config\\Xe-GearEngine.ini") {
   Bytes sys = Cat({W(u"SystemSettings"), I32(with_dynamic ? 5 : 4)});
   auto add = [&](const Bytes& b) { sys.insert(sys.end(), b.begin(), b.end()); };
   if (with_dynamic) add(KV(u"DynamicShadows", u"True"));
@@ -50,7 +51,7 @@ Bytes Sample(bool with_dynamic = true, std::u16string_view tuple = kTuple) {
   add(KV(u"DetailMode", u"2"));
   add(KV(u"DetailMode", u"3"));
   add(KV(u"TEXTUREGROUP_World", tuple));
-  const Bytes f1 = Cat({W(u"..\\GearGame\\Config\\Xe-GearEngine.ini"), I32(3),
+  const Bytes f1 = Cat({W(ini), I32(3),
                         W(u"Engine.Engine"), I32(1), KV(u"MaxShadowResolution", u"432"), sys,
                         W(u"SystemSettingsEditor"), I32(1), KV(u"TEXTUREGROUP_World", kTuple)});
   const Bytes f2 = Cat({A("..\\GearGame\\Localization\\RUS\\Gear.int"), I32(1), W(u"Тест"),
@@ -206,6 +207,18 @@ TEST_CASE("engine_config: Prepare writes only the valid modified Coalesced files
   const auto q = Prepare(cooked, tmp2.path / "out", Engine{});
   CHECK(q.replacements.empty());
   CHECK_FALSE(fs::exists(tmp2.path / "out"));
+}
+
+TEST_CASE("engine_config: ApplyEdits also edits Xbox360-GearEngine.ini", "[engine_config]") {
+  constexpr std::u16string_view kIni = u"..\\..\\GearGame\\Config\\Xbox360-GearEngine.ini";
+  auto files = *Parse(Sample(true, kTuple, kIni));
+  REQUIRE(ApplyEdits(files, EditsFor(Engine{ShadowQuality::kHigh, false})));
+  CHECK(Val(files, 1, u"MaxShadowResolution") == u"2048");
+  CHECK(Val(files, 1, u"DynamicShadows") == u"False");
+  files = *Parse(Sample(false, kTuple, kIni));
+  const auto missing = ApplyEdits(files, EditsFor(Engine{ShadowQuality::kOriginal, false}));
+  REQUIRE_FALSE(missing);
+  CHECK(missing.error() == "Xbox360-GearEngine.ini [SystemSettings] DynamicShadows missing");
 }
 
 TEST_CASE("engine_config: ApplyEdits finds the field case-insensitively", "[engine_config]") {

@@ -22,8 +22,12 @@
 
 PPC_EXTERN_FUNC(__imp__XexGetModuleHandle);
 PPC_EXTERN_FUNC(__imp__XexGetModuleSection);
+PPC_EXTERN_FUNC(__imp__XexLoadImage);
+PPC_EXTERN_FUNC(__imp__XexUnloadImage);
+PPC_EXTERN_FUNC(__imp__XexGetProcedureAddress);
 PPC_EXTERN_FUNC(__imp__RtlImageXexHeaderField);
 PPC_EXTERN_FUNC(__imp__KeEnableFpuExceptions);
+PPC_EXTERN_FUNC(__imp__XamGetExecutionId);
 
 namespace {
 
@@ -119,9 +123,100 @@ TEST_CASE("module: XexGetModuleHandle, null name or default.xex; others not foun
   Put32(out, 0);
   CHECK(Call(__imp__XexGetModuleHandle, {name, out}) == 0);
   CHECK(Get32(out) == e.hmodule);
-  std::strcpy(GuestPtr<char>(name), "xam.xex");
+  std::strcpy(GuestPtr<char>(name), "game.xex");
   CHECK(Call(__imp__XexGetModuleHandle, {name, out}) == 0x490);
   CHECK(Get32(out) == 0);
+}
+
+TEST_CASE("module: kernel modules have a handle; XexGetProcedureAddress installs their exports") {
+  Env& e = E();
+  const uint32_t out = e.scratch + 0x400, name = e.scratch + 0x410, proc_name = e.scratch + 0x440;
+  std::strcpy(GuestPtr<char>(name), "XAM.XEX");
+  CHECK(Call(__imp__XexGetModuleHandle, {name, out}) == 0);
+  const uint32_t xam = Get32(out);
+  CHECK(xam != 0);
+  CHECK(xam != e.hmodule);
+  std::strcpy(GuestPtr<char>(name), "xam.xex");
+  Put32(out, 0);
+  CHECK(Call(__imp__XexLoadImage, {name, 9, 0, out}) == 0);
+  CHECK(Get32(out) == xam);
+  CHECK(Call(__imp__XexUnloadImage, {xam}) == 0);
+
+  // Without an installer every kernel procedure is not found.
+  module::SetProcedureInstaller(nullptr);
+  CHECK(Call(__imp__XexGetProcedureAddress, {xam, 0x279, out}) == 0xC0000263);
+  static uint32_t installed = 0;
+  static module::HostFunction* last = nullptr;
+  module::SetProcedureInstaller([](module::HostFunction* f) {
+    last = f;
+    return 0x83000000u + 4 * installed++;
+  });
+  // 0x279 = XamContentAggregateCreateEnumerator (implemented), once per export.
+  CHECK(Call(__imp__XexGetProcedureAddress, {xam, 0x279, out}) == 0);
+  CHECK(Get32(out) == 0x83000000);
+  CHECK(last == FindExport("XamContentAggregateCreateEnumerator"));
+  CHECK(Call(__imp__XexGetProcedureAddress, {xam, 0x279, out}) == 0);
+  CHECK(Get32(out) == 0x83000000);
+  CHECK(installed == 1);
+  // By name (an address from 0x10000).
+  std::strcpy(GuestPtr<char>(proc_name), "XamContentAggregateCreateEnumerator");
+  CHECK(Call(__imp__XexGetProcedureAddress, {xam, proc_name, out}) == 0);
+  CHECK(Get32(out) == 0x83000000);
+  // Not implemented here (XamMediaVerificationVerify): not found, out 0.
+  std::strcpy(GuestPtr<char>(proc_name), "XamMediaVerificationVerify");
+  CHECK(Call(__imp__XexGetProcedureAddress, {xam, proc_name, out}) == 0xC0000263);
+  CHECK(Get32(out) == 0);
+  module::SetProcedureInstaller(nullptr);
+}
+
+TEST_CASE("module: XamGetExecutionId points at the execution info header") {
+  Env& e = E();
+  const uint32_t out = e.scratch + 0x480;
+  CHECK(Call(__imp__XamGetExecutionId, {out}) == 0xC0000225);  // the synthetic header has no 0x40006
+  CHECK(Call(__imp__XamGetExecutionId, {0}) == 0xC0000225);
+  CHECK(module::ExecutableTitleId() == 0);
+}
+
+TEST_CASE("module: ExecutableTitleId reads the title id of the execution info") {
+  Env& e = E();
+  std::vector<uint8_t> h = MakeHeader();
+  PutBe32(h, 0x14, 4);  // a fourth optional header: execution info at +0x80
+  PutBe32(h, 0x30, 0x00040006);
+  PutBe32(h, 0x34, 0x80);
+  PutBe32(h, 0x80 + 12, 0x4D5308AB);
+  REQUIRE(module::InitExecutable({0x82000000, 0x1230000, 0x82AAC8D8, h, "default.xex"}) != 0);
+  CHECK(module::ExecutableTitleId() == 0x4D5308AB);
+  // Back to the shared header for the other test cases.
+  e.hmodule = module::InitExecutable({0x82000000, 0x1230000, 0x82AAC8D8, MakeHeader(), "default.xex"});
+  REQUIRE(e.hmodule != 0);
+  CHECK(module::ExecutableTitleId() == 0);
+}
+
+TEST_CASE("module: XexLoadImage only knows the executable; other modules are not found") {
+  Env& e = E();
+  const uint32_t out = e.scratch + 0x300, name = e.scratch + 0x310;
+  std::strcpy(GuestPtr<char>(name), "default.xex");
+  Put32(out, 0);
+  CHECK(Call(__imp__XexLoadImage, {name, 9, 0, out}) == 0);
+  CHECK(Get32(out) == e.hmodule);
+  CHECK(Call(__imp__XexUnloadImage, {e.hmodule}) == 0);
+  // No second module can be loaded (kernel modules have no LDR here): the
+  // game must see a failure and skip the optional imports it wanted.
+  std::strcpy(GuestPtr<char>(name), "dlc.xex");
+  Put32(out, 0xFFFFFFFF);
+  CHECK(Call(__imp__XexLoadImage, {name, 9, 0, out}) == 0xC0000034);
+  CHECK(Get32(out) == 0);
+  CHECK(Call(__imp__XexUnloadImage, {0x12340000}) == 0xC0000008);
+}
+
+TEST_CASE("module: XexGetProcedureAddress, invalid handle or no export") {
+  Env& e = E();
+  const uint32_t out = e.scratch + 0x320;
+  Put32(out, 0xFFFFFFFF);
+  CHECK(Call(__imp__XexGetProcedureAddress, {0xFFFFFFFF, 0xAFF, out}) == 0xC0000008);
+  CHECK(Call(__imp__XexGetProcedureAddress, {e.hmodule, 1, out}) == 0xC0000263);
+  CHECK(Get32(out) == 0);
+  CHECK(Call(__imp__XexGetProcedureAddress, {0, 1, out}) == 0xC0000263);
 }
 
 TEST_CASE("module: XexGetModuleSection looks up the header's resources") {

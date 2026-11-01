@@ -110,7 +110,7 @@ def test_cli_missing_pattern_exits_1(tmp_path):
     assert "savegprlr_14_address" in r.stderr
 
 
-CONFIG = REPO / "config" / "gow2.toml"
+CONFIG = REPO / "games" / "gow2" / "gow2.toml"
 REAL_IMAGE = REPO / "build" / "xex" / "image.bin"
 REAL_INFO = REPO / "build" / "xex" / "info.json"
 

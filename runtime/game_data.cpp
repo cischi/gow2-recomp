@@ -7,10 +7,15 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <system_error>
 #include <vector>
 
+#include <image.h>
+#include <xex.h>
+
+#include "xex_check.h"
 
 namespace game_data {
 
@@ -86,14 +91,32 @@ std::string Sha256Bytes(std::span<const std::byte> bytes) {
       .value_or(std::string());
 }
 
+std::optional<std::string> XexImageSha256(std::span<const std::byte> xex) {
+  std::vector<uint8_t> file(reinterpret_cast<const uint8_t*>(xex.data()),
+                            reinterpret_cast<const uint8_t*>(xex.data()) + xex.size());
+  // Same steps as LoadImage and xexdump: validate first (ParseImage does not), keep the import records intact,
+  // copy only the produced bytes and zero the rest.
+  const auto produced = xexcheck::ValidateXex(file);
+  if (!produced) return std::nullopt;
+  xexcheck::ZeroImportKey(file);
+  const Image image = Image::ParseImage(file.data(), file.size());
+  if (!image.data || image.size < 0x40 || image.data[0] != 'M' || image.data[1] != 'Z') return std::nullopt;
+  std::vector<std::byte> bytes(image.size);
+  std::memcpy(bytes.data(), image.data.get(), size_t(std::min<uint64_t>(*produced, image.size)));
+  return Sha256Bytes(bytes);
+}
+
 XexCheck CheckXex(const fs::path& data_dir, std::string_view expected) {
   std::error_code ec;
   const fs::path xex = data_dir / "default.xex";
   if (!fs::is_regular_file(xex, ec)) return XexCheck::kMissing;
   if (SkipHash()) return XexCheck::kOk;
-  const auto sum = Sha256File(xex);
-  if (!sum) return XexCheck::kUnreadable;
-  return *sum == expected ? XexCheck::kOk : XexCheck::kMismatch;
+  std::ifstream in(xex, std::ios::binary | std::ios::ate);
+  if (!in) return XexCheck::kUnreadable;
+  std::vector<char> file(size_t(in.tellg()));
+  if (!in.seekg(0) || !in.read(file.data(), std::streamsize(file.size()))) return XexCheck::kUnreadable;
+  const auto sum = XexImageSha256(std::as_bytes(std::span(file)));
+  return sum == expected ? XexCheck::kOk : XexCheck::kMismatch;
 }
 
 bool ExtractionComplete(const fs::path& data_dir) {
@@ -101,10 +124,10 @@ bool ExtractionComplete(const fs::path& data_dir) {
   return fs::is_regular_file(data_dir / ".extract_ok", ec) && fs::is_regular_file(data_dir / "default.xex", ec);
 }
 
-fs::path ResolveDataDir(const fs::path& exe_dir) {
-  fs::path dir = "game_data";
+fs::path ResolveDataDir(const fs::path& exe_dir, std::string_view dir_name) {
+  fs::path dir = dir_name;
   std::error_code ec;
-  if (!fs::is_directory(dir, ec)) return exe_dir / "game_data";
+  if (!fs::is_directory(dir, ec)) return exe_dir / dir;
   return dir;
 }
 

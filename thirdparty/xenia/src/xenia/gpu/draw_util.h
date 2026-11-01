@@ -500,6 +500,27 @@ struct GetViewportInfoArgs {
   }
 };
 
+// gow2: fraction of the upscaler jitter (guest px of the scene) a draw gets, in
+// its own pixels (patch 0013). 1: draws with a depth test on the scene surfaces
+// (pitch scene_pitch), except depth restores from a texture (pixel shader
+// writing depth with an ALWAYS test: the texture already holds the shifted
+// geometry) and the remapped Clear (patch 0017). 0.5: occlusion query boxes
+// (depth test, no depth or color writes) on the half-resolution surface, so
+// they stay on the jittered geometry the query depth was built from (GoW3:
+// otherwise distant floors fail against themselves and flash). 0: the rest.
+inline float Gow2JitterScale(bool z_enable, bool z_write,
+                             xenos::CompareFunction zfunc, bool ps_writes_depth,
+                             uint32_t surface_pitch, uint32_t scene_pitch,
+                             uint32_t color_mask, bool clear_remapped) {
+  if (!z_enable || clear_remapped ||
+      (ps_writes_depth && zfunc == xenos::CompareFunction::kAlways)) {
+    return 0.0f;
+  }
+  if (surface_pitch == scene_pitch) return 1.0f;
+  if (surface_pitch * 2 == scene_pitch && !z_write && !color_mask) return 0.5f;
+  return 0.0f;
+}
+
 // Converts the guest viewport (or fakes one if drawing without a viewport) to
 // a viewport, plus values to multiply-add the returned position by, usable on
 // host graphics APIs such as Direct3D 11+ and Vulkan, also forcing it to the

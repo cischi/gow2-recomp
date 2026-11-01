@@ -3,6 +3,9 @@
 #include <algorithm>
 #include <array>
 
+#include "game_patches/game_patches.h"
+#include "game_profile.h"
+
 namespace launcher {
 
 std::vector<Resolution> ResolutionChoices(std::vector<Resolution> modes, uint32_t cur_w, uint32_t cur_h) {
@@ -121,6 +124,18 @@ WindowSetup WindowSetupFor(const settings::Video& v) {
     ws.exclusive = true;
   }
   return ws;
+}
+
+std::set<std::string> UnavailableOptions() {
+  using namespace game_patches;
+  std::set<std::string> out;
+  for (const Patch& p : All())
+    if (!p.internal && !p.available) out.insert(p.key);
+  if (!Available(kAspect21x9) || !Available(kAspect16x10)) out.insert("aspect");
+  if (!Available(kFrameRateInterval) || !Available(kFrameRateUnlock)) out.insert("frame_rate");
+  if (game_profile::Get().cooked_dir.empty() || !Available(kCoalescedNoHashCheck)) out.insert("engine");
+  if (!game_profile::Get().post.hdr) out.insert("hdr");  // no HDR reconstruction for this game's post processing
+  return out;
 }
 
 }  // namespace launcher

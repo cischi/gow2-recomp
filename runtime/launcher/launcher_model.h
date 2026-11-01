@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <set>
 #include <span>
 #include <string>
 #include <string_view>
@@ -66,5 +67,9 @@ struct WindowSetup {
   bool exclusive = false;
 };
 WindowSetup WindowSetupFor(const settings::Video& v);
+
+// Options this game does not have (game_patches::Available, game_profile cooked_dir): the [patches] keys,
+// "aspect", "frame_rate" and "engine". The launcher and the overlay disable their rows.
+std::set<std::string> UnavailableOptions();
 
 }  // namespace launcher

@@ -508,3 +508,28 @@ TEST_CASE("draw_util: upscaler jitter with the Xenos sample positions", "[d3d12_
   }
   REQUIRE(corrected);
 }
+
+// Which draws get the upscaler jitter, and by how much of it (patch 0013): the scene surfaces (pitch of the
+// scene) the whole jitter; the occlusion query boxes (depth test without depth or color writes on the
+// half-resolution surface) half of it in their own pixels, so they stay on the jittered geometry the query
+// depth was built from (GoW3 distant floors flashing with DLSS); depth restores, remapped clears, shadow maps
+// and other half-resolution passes none. CPU only.
+TEST_CASE("draw_util: upscaler jitter scale per draw", "[d3d12_msaa]") {
+  using xe::gpu::draw_util::Gow2JitterScale;
+  using xe::gpu::xenos::CompareFunction;
+  constexpr uint32_t kScene = 1280, kHalf = 640;
+  // Scene geometry and lights.
+  CHECK(Gow2JitterScale(true, true, CompareFunction::kGreaterEqual, false, kScene, kScene, 0xF, false) == 1.0f);
+  CHECK(Gow2JitterScale(true, false, CompareFunction::kGreaterEqual, false, kScene, kScene, 0x0, false) == 1.0f);
+  // Query boxes on the half-resolution query depth.
+  CHECK(Gow2JitterScale(true, false, CompareFunction::kGreaterEqual, false, kHalf, kScene, 0x0, false) == 0.5f);
+  // Half-resolution passes writing color or depth (velocity, the query depth restore itself).
+  CHECK(Gow2JitterScale(true, false, CompareFunction::kGreaterEqual, false, kHalf, kScene, 0xF, false) == 0.0f);
+  CHECK(Gow2JitterScale(true, true, CompareFunction::kAlways, true, kHalf, kScene, 0x0, false) == 0.0f);
+  // Scene depth restore, remapped clear, no depth test, shadow map, no scene pitch yet.
+  CHECK(Gow2JitterScale(true, true, CompareFunction::kAlways, true, kScene, kScene, 0x0, false) == 0.0f);
+  CHECK(Gow2JitterScale(true, true, CompareFunction::kGreaterEqual, false, kScene, kScene, 0xF, true) == 0.0f);
+  CHECK(Gow2JitterScale(false, false, CompareFunction::kAlways, false, kScene, kScene, 0xF, false) == 0.0f);
+  CHECK(Gow2JitterScale(true, true, CompareFunction::kLessEqual, false, 1024, kScene, 0x0, false) == 0.0f);
+  CHECK(Gow2JitterScale(true, false, CompareFunction::kGreaterEqual, false, 0, 0, 0x0, false) == 1.0f);
+}

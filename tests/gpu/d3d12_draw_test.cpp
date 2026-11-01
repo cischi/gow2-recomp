@@ -35,6 +35,7 @@
 #include <vector>
 
 #include "gpu/d3d12_probe.h"
+#include "xenia/gpu/d3d12/d3d12_command_processor.h"
 #include "physical_watch.h"
 #include "ucode_builder.h"
 
@@ -247,6 +248,49 @@ TEST_CASE("d3d12_draw: ZPD report with one submission per draw", "[d3d12_draw]")
   f.CheckLogClean();
 }
 
+// The same at internal resolution 2x with d3d12_submit_every_draws_scaled (patch 0020, GoW3): the report split
+// between submissions counts host samples at 2x2 per pixel and still gives the guest samples of the two draws.
+TEST_CASE("d3d12_draw: ZPD report with one submission per draw at scale 2", "[d3d12_draw]") {
+  if (!HasHardwareAdapter()) SKIP("no hardware D3D12 adapter");
+  REQUIRE(gpu::SetXeniaCvar("occlusion_query", "strict"));
+  REQUIRE(gpu::SetXeniaCvar("d3d12_submit_every_draws", "1"));
+  REQUIRE(gpu::SetXeniaCvar("d3d12_submit_every_draws_scaled", "true"));
+  REQUIRE(gpu::SetXeniaCvar("draw_resolution_scale_x", "2"));
+  REQUIRE(gpu::SetXeniaCvar("draw_resolution_scale_y", "2"));
+  struct CvarRestore {
+    ~CvarRestore() {
+      gpu::SetXeniaCvar("d3d12_submit_every_draws_scaled", "false");
+      gpu::SetXeniaCvar("draw_resolution_scale_x", "1");
+      gpu::SetXeniaCvar("draw_resolution_scale_y", "1");
+    }
+  } restore;
+  DrawFixture f;
+  constexpr uint32_t kRbSampleCountAddr = 0x2325;
+  constexpr uint32_t kZpassDone = 0x15;
+  constexpr uint32_t kPending = 0xFFFFFEED;  // D3D sentinel, big-endian in memory
+  const uint32_t begin = f.data() + 0x800, end = begin + 32;
+  for (uint32_t r : {begin, end})
+    for (uint32_t off = 0; off < 32; off += 4) D3D12Harness::Put32(r + off, kPending);
+  Pm4Builder p = f.Begin();
+  p.ImLoadImmediate(gow2_test::kShaderVertex, ub::VsPositionFromStream())
+      .ImLoadImmediate(gow2_test::kShaderPixel, ub::PsConstantColor())
+      .SetAluConstants(gow2_test::kAluConstantPs0, {F(0.f), F(1.f), F(0.f), F(1.f)})
+      .VertexFetch0(f.vertices() + kDecoyBytes, kVertexDwords)
+      .SetRegs(kRbSampleCountAddr, {begin})
+      .Type3(gpu::kPm4EventWriteZpd, {kZpassDone})
+      .DrawIndx2Auto(gow2_test::kPrimRectangleList, 3)
+      .DrawIndx2Auto(gow2_test::kPrimRectangleList, 3)
+      .SetRegs(kRbSampleCountAddr, {end})
+      .Type3(gpu::kPm4EventWriteZpd, {kZpassDone});
+  f.ResolveAndRun(p, 0);
+  // ZPass = A + B (little-endian), written when the ring is empty.
+  const auto zpass = [](uint32_t r) { return D3D12Harness::HostGet32(r + 16) + D3D12Harness::HostGet32(r + 20); };
+  REQUIRE(D3D12Harness::Eventually([&] { return D3D12Harness::Get32(end + 16) != kPending; }, 5000ms));
+  INFO("begin " << zpass(begin) << " end " << zpass(end));
+  CHECK(zpass(end) - zpass(begin) == 2 * kSize * kSize);
+  f.CheckLogClean();
+}
+
 TEST_CASE("d3d12_draw: IM_LOAD from physical memory and LOAD_ALU_CONSTANT", "[d3d12_draw]") {
   if (!HasHardwareAdapter()) SKIP("no hardware D3D12 adapter");
   DrawFixture f;
@@ -364,4 +408,97 @@ TEST_CASE("d3d12_draw: IM_LOAD microcode rewritten in an observed page, no stale
   f.CheckColor(1, kRedRgba);
   f.CheckColor(3, kRedArgb);
   f.CheckLogClean();
+}
+
+// Patch 0021: the draw observer sees the VS and PS translations of the one draw, issued (not skipped).
+namespace {
+struct ObservedDraw {
+  uint64_t vs_hash, ps_hash;
+  xe::gpu::xenos::ShaderType vs_type, ps_type;
+  bool skipped;
+};
+std::vector<ObservedDraw> observed_draws;
+void ObserveDraw(xe::gpu::d3d12::D3D12Shader::D3D12Translation& vs, xe::gpu::d3d12::D3D12Shader::D3D12Translation* ps,
+                 bool skipped) {
+  observed_draws.push_back({vs.shader().ucode_data_hash(), ps ? ps->shader().ucode_data_hash() : 0,
+                            vs.shader().type(), ps ? ps->shader().type() : xe::gpu::xenos::ShaderType::kVertex,
+                            skipped});
+}
+}  // namespace
+
+TEST_CASE("d3d12_draw: draw observer reports the translations used", "[d3d12_draw]") {
+  if (!HasHardwareAdapter()) SKIP("no hardware D3D12 adapter");
+  xe::gpu::d3d12::SetDrawObserverHook(&ObserveDraw);
+  DrawFixture f;
+  Pm4Builder p = f.Begin();
+  p.ImLoadImmediate(gow2_test::kShaderVertex, ub::VsPositionFromStream())
+      .ImLoadImmediate(gow2_test::kShaderPixel, ub::PsConstantColor())
+      .SetAluConstants(gow2_test::kAluConstantPs0, {F(0.f), F(1.f), F(0.f), F(1.f)})
+      .VertexFetch0(f.vertices() + kDecoyBytes, kVertexDwords)
+      .DrawIndx2Auto(gow2_test::kPrimRectangleList, 3);
+  f.ResolveAndRun(p, 0);
+  xe::gpu::d3d12::SetDrawObserverHook(nullptr);  // global in Xenia
+  f.CheckColor(0, kGreen);
+  REQUIRE(observed_draws.size() == 1);
+  const ObservedDraw& d = observed_draws[0];
+  CHECK(d.vs_type == xe::gpu::xenos::ShaderType::kVertex);
+  CHECK(d.ps_type == xe::gpu::xenos::ShaderType::kPixel);
+  CHECK(d.vs_hash != 0);
+  CHECK(d.ps_hash != 0);
+  CHECK(d.vs_hash != d.ps_hash);
+  CHECK_FALSE(d.skipped);
+}
+
+// Patch 0021: the ZPD observer sees each EVENT_WRITE_ZPD when queued, in command order, and its sample delta when
+// retired (begin: no draws before it; end: the two 64x64 draws).
+namespace {
+struct ObservedZpd {
+  bool retired;
+  uint64_t handle;
+  uint32_t address;
+  uint64_t z_pass;
+};
+std::vector<ObservedZpd> observed_zpds;
+void ObserveZpd(bool retired, uint64_t handle, uint32_t address, uint64_t z_pass, uint64_t) {
+  observed_zpds.push_back({retired, handle, address, z_pass});
+}
+}  // namespace
+
+TEST_CASE("d3d12_draw: ZPD observer reports queued and retired reports", "[d3d12_draw]") {
+  if (!HasHardwareAdapter()) SKIP("no hardware D3D12 adapter");
+  REQUIRE(gpu::SetXeniaCvar("occlusion_query", "strict"));
+  xe::gpu::SetZPDObserverHook(&ObserveZpd);
+  DrawFixture f;
+  constexpr uint32_t kRbSampleCountAddr = 0x2325;
+  constexpr uint32_t kZpassDone = 0x15;
+  constexpr uint32_t kPending = 0xFFFFFEED;
+  const uint32_t begin = f.data() + 0x800, end = begin + 32;
+  for (uint32_t r : {begin, end})
+    for (uint32_t off = 0; off < 32; off += 4) D3D12Harness::Put32(r + off, kPending);
+  Pm4Builder p = f.Begin();
+  p.ImLoadImmediate(gow2_test::kShaderVertex, ub::VsPositionFromStream())
+      .ImLoadImmediate(gow2_test::kShaderPixel, ub::PsConstantColor())
+      .SetAluConstants(gow2_test::kAluConstantPs0, {F(0.f), F(1.f), F(0.f), F(1.f)})
+      .VertexFetch0(f.vertices() + kDecoyBytes, kVertexDwords)
+      .SetRegs(kRbSampleCountAddr, {begin})
+      .Type3(gpu::kPm4EventWriteZpd, {kZpassDone})
+      .DrawIndx2Auto(gow2_test::kPrimRectangleList, 3)
+      .DrawIndx2Auto(gow2_test::kPrimRectangleList, 3)
+      .SetRegs(kRbSampleCountAddr, {end})
+      .Type3(gpu::kPm4EventWriteZpd, {kZpassDone});
+  f.ResolveAndRun(p, 0);
+  REQUIRE(D3D12Harness::Eventually([&] { return D3D12Harness::Get32(end + 16) != kPending; }, 5000ms));
+  xe::gpu::SetZPDObserverHook(nullptr);  // global in Xenia
+  std::vector<ObservedZpd> queued, retired;
+  for (const ObservedZpd& z : observed_zpds) (z.retired ? retired : queued).push_back(z);
+  REQUIRE(queued.size() == 2);
+  CHECK(queued[0].address == begin);
+  CHECK(queued[1].address == end);
+  CHECK(queued[0].handle != queued[1].handle);
+  REQUIRE(retired.size() == 2);
+  CHECK(retired[0].handle == queued[0].handle);
+  CHECK(retired[0].z_pass == 0);
+  CHECK(retired[1].handle == queued[1].handle);
+  CHECK(retired[1].address == end);
+  CHECK(retired[1].z_pass == 2 * kSize * kSize);
 }

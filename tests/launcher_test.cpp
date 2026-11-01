@@ -28,6 +28,10 @@
 
 using Res = std::pair<uint32_t, uint32_t>;
 
+TEST_CASE("launcher: UnavailableOptions is empty for GoW2", "[launcher]") {
+  CHECK(launcher::UnavailableOptions().empty());
+}
+
 TEST_CASE("launcher: ResolutionChoices", "[launcher]") {
   const auto r = launcher::ResolutionChoices({{1920, 1080}, {640, 400}, {2560, 1440}, {1920, 1080}, {800, 600}}, 0, 0);
   CHECK(r == std::vector<Res>{{2560, 1440}, {1920, 1080}, {1280, 720}, {800, 600}});
@@ -263,6 +267,36 @@ TEST_CASE("launcher: Game data section returns kChooseIso, then kCancelExtract w
   const auto a = ClickFirstButton(overlay);
   CHECK(a != launcher::Action::kChooseIso);
   CHECK(a != launcher::Action::kCancelExtract);
+}
+
+// The texts filled from the profile are, for gow2, exactly the ones written out before the placeholders.
+TEST_CASE("launcher: gow2 texts with game name, edition and exe are unchanged", "[launcher]") {
+  const auto& it = launcher::Text(launcher::UiLanguage::kItalian);
+  const auto& en = launcher::Text(launcher::UiLanguage::kEnglish);
+  const std::pair<const char*, const char*> expected[] = {
+      {it.frame_generation_unavailable,
+       "Non disponibile: manca amd_fidelityfx_framegeneration_dx12.dll accanto a gow2.exe"},
+      {it.frame_generation_dlss_unavailable, "Non disponibile: mancano gow2_dlss.dll o nvngx_dlssg.dll accanto a gow2.exe"},
+      {it.optiscaler_tip,
+       "Scarica OptiScaler %s (fork F5, GPL-3) da GitHub e lo mette accanto a gow2.exe. Il rendering neurale richiede "
+       "nvngx_dlssnr.dll, da procurarsi a parte. Il launcher si riavvia: le modifiche non salvate vanno perse."},
+      {it.optiscaler_no_dlssnr,
+       "Il rendering neurale richiede nvngx_dlssnr.dll accanto a gow2.exe (nvngx_dlssnr.dll non fornita dal progetto)."},
+      {it.data_missing, "Dati del gioco mancanti: scegli la tua ISO di Gears of War 2 (PAL Europa)."},
+      {it.iso_wrong_edition, "Edizione non supportata: serve l'ISO PAL Europa di Gears of War 2."},
+      {it.extract_wrong_edition, "Edizione non supportata: i file estratti non corrispondono all'ISO PAL Europa."},
+      {en.frame_generation_unavailable, "Not available: amd_fidelityfx_framegeneration_dx12.dll is missing next to gow2.exe"},
+      {en.frame_generation_dlss_unavailable, "Not available: gow2_dlss.dll or nvngx_dlssg.dll is missing next to gow2.exe"},
+      {en.optiscaler_tip,
+       "Downloads OptiScaler %s (F5 fork, GPL-3) from GitHub and puts it next to gow2.exe. Neural rendering needs "
+       "nvngx_dlssnr.dll, to be obtained separately. The launcher restarts: unsaved changes are lost."},
+      {en.optiscaler_no_dlssnr,
+       "Neural rendering needs nvngx_dlssnr.dll next to gow2.exe (nvngx_dlssnr.dll is not provided by the project)."},
+      {en.data_missing, "Game data missing: choose your Gears of War 2 ISO (PAL Europe)."},
+      {en.iso_wrong_edition, "Unsupported edition: the PAL Europe ISO of Gears of War 2 is required."},
+      {en.extract_wrong_edition, "Unsupported edition: the extracted files do not match the PAL Europe ISO."},
+  };
+  for (const auto& [actual, want] : expected) CHECK(std::string(actual) == want);
 }
 
 TEST_CASE("launcher: FitScale keeps the window inside the work area", "[launcher]") {
@@ -553,6 +587,8 @@ TEST_CASE("launcher: Text has all the strings in both languages", "[launcher]") 
     // C3 83 is "A tilde" in UTF-8: a sign of text encoded twice (mojibake).
     CHECK(std::string(a[i]).find("\xC3\x83") == std::string::npos);
     CHECK(std::string(b[i]).find("\xC3\x83") == std::string::npos);
+    CHECK(std::string(a[i]).find('{') == std::string::npos);  // {game}, {edition}, {exe} all filled
+    CHECK(std::string(b[i]).find('{') == std::string::npos);
   }
   CHECK(std::string(it.play) == "Gioca");
   CHECK(std::string(en.play) == "Play");

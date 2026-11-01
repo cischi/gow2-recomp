@@ -32,6 +32,8 @@ bool Loaded(const std::filesystem::path& exe_dir);
 // Writes the default settings (table in optiscaler.cpp) into their sections; the rest stays identical.
 // Empty if a key is missing from its section.
 std::string PatchIni(std::string_view ini);
+// OptiScaler's NR as saved in the ini: off only with [DlssNr] Enabled = false (auto, missing or unreadable count as on).
+bool NrEnabled(std::string_view ini);
 
 // Downloads url to dest: nullopt = succeeded, otherwise the reason.
 using Fetch = std::function<std::optional<std::string>(std::wstring_view url, const std::filesystem::path& dest)>;

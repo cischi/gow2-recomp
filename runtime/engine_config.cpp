@@ -152,8 +152,11 @@ std::expected<std::vector<std::string>, std::string> ApplyEdits(std::vector<IniF
   std::vector<IniFile> work = files;
   std::vector<std::string> log;
   Section* sec = nullptr;
+  std::string ini = "Xe-GearEngine.ini";  // name in the messages: the file found (Xe- or Xbox360-GearEngine.ini)
   for (auto& f : work) {
-    if (!Lower(Ascii(f.name.text)).ends_with("xe-gearengine.ini")) continue;
+    const std::string name = Ascii(f.name.text);
+    if (!Lower(name).ends_with("-gearengine.ini")) continue;
+    ini = name.substr(name.find_last_of("\\/") + 1);
     for (auto& s : f.sections)
       if (EqNoCase(s.name.text, "SystemSettings")) {
         sec = &s;
@@ -163,7 +166,7 @@ std::expected<std::vector<std::string>, std::string> ApplyEdits(std::vector<IniF
   }
   for (const Edit& ed : edits) {
     const std::string label = std::string(ed.key) + (ed.field.empty() ? "" : " " + std::string(ed.field));
-    const std::string missing = "Xe-GearEngine.ini [SystemSettings] " + label + " missing";
+    const std::string missing = ini + " [SystemSettings] " + label + " missing";
     Entry* ent = nullptr;
     if (sec)
       for (auto& e : sec->entries)

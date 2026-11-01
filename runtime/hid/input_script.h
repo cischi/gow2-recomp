@@ -24,6 +24,7 @@ struct ScriptEvent {
   uint32_t hold_ms;
   int16_t lx = 0, ly = 0;  // LS_UP/LS_DOWN/LS_LEFT/LS_RIGHT (left stick fully deflected)
   uint8_t lt = 0, rt = 0;  // LT/RT fully pressed
+  int16_t rx = 0, ry = 0;  // RS_UP/RS_DOWN/RS_LEFT/RS_RIGHT (right stick fully deflected)
 };
 
 // Events separated by ',' (none empty), each "<s>:<BUTTON>[+<ms>]":
@@ -31,7 +32,8 @@ struct ScriptEvent {
 //    (".5" and "1." are invalid), at most 86400;
 //  - BUTTON (uppercase): DPAD_UP DPAD_DOWN DPAD_LEFT DPAD_RIGHT START BACK
 //    LTHUMB RTHUMB LB RB A B X Y, or LS_UP LS_DOWN LS_LEFT LS_RIGHT (left
-//    stick fully deflected) LT RT (trigger fully pressed);
+//    stick fully deflected) RS_UP RS_DOWN RS_LEFT RS_RIGHT (right stick) LT RT
+//    (trigger fully pressed);
 //  - ms: press duration, integer 1..60000, default 100.
 // nullopt if malformed (also the empty string). Events in the given order.
 std::optional<std::vector<ScriptEvent>> ParseInputScript(std::string_view);

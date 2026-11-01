@@ -12,6 +12,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <string_view>
 
 #include "kernel/function.h"
 #include "kernel/stats.h"
@@ -33,6 +34,12 @@ inline void CheckSuspend() {
 inline thread_local uint32_t t_export_caller = 0;
 inline uint32_t ExportCaller() { return t_export_caller; }
 
+// Every KERNEL_EXPORT / KERNEL_EXPORT_RAW registers its __imp__ function by
+// name at static initialization: XexGetProcedureAddress on a kernel module
+// (module.cpp) hands out the exports a title resolves at run time.
+bool RegisterExport(const char* name, PPCFunc* func);
+PPCFunc* FindExport(std::string_view name);  // nullptr if not implemented
+
 namespace stats {
 // --trace: writes "[kernel] Name(r3=0x..., ..., r10=0x...)" (stats.cpp).
 void TraceCall(const char* name, const PPCContext& ctx);
@@ -40,6 +47,8 @@ void TraceCall(const char* name, const PPCContext& ctx);
 }  // namespace kernel
 
 #define KERNEL_EXPORT(Name, HostFunc)                              \
+  PPC_EXTERN_FUNC(__imp__##Name);                                  \
+  [[maybe_unused]] static const bool Name##_registered = ::kernel::RegisterExport(#Name, __imp__##Name); \
   PPC_FUNC(__imp__##Name) {                                        \
     ::kernel::CheckSuspend();                                      \
     ::kernel::t_export_caller = static_cast<uint32_t>(ctx.lr);         if (::kernel::stats::Trace()) ::kernel::stats::TraceCall(#Name, ctx); \
@@ -48,4 +57,4 @@ void TraceCall(const char* name, const PPCContext& ctx);
 
 // For imports that need the whole PPCContext (e.g. lr of
 // KeBugCheck): KERNEL_EXPORT_RAW(Name) { ...body with ctx and base... }
-#define KERNEL_EXPORT_RAW(Name)                                                      static void Name##_raw_body(PPCContext& ctx, uint8_t* base);                       PPC_FUNC(__imp__##Name) {                                                            if (::kernel::stats::Trace()) ::kernel::stats::TraceCall(#Name, ctx);              Name##_raw_body(ctx, base);                                                      }                                                                                  static void Name##_raw_body(PPCContext& ctx, uint8_t* base)
+#define KERNEL_EXPORT_RAW(Name)                                                      static void Name##_raw_body(PPCContext& ctx, uint8_t* base);   PPC_EXTERN_FUNC(__imp__##Name);   [[maybe_unused]] static const bool Name##_registered = ::kernel::RegisterExport(#Name, __imp__##Name);                       PPC_FUNC(__imp__##Name) {                                                            if (::kernel::stats::Trace()) ::kernel::stats::TraceCall(#Name, ctx);              Name##_raw_body(ctx, base);                                                      }                                                                                  static void Name##_raw_body(PPCContext& ctx, uint8_t* base)

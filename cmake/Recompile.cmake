@@ -1,8 +1,8 @@
 # Static recompilation of default.xex with XenonRecomp.
 #
-# Included by CMakeLists.txt: defines the `recompile` target (outside `all`,
-# because it needs the user's game data) and the variable
-# GOW2_GENERATED_SOURCES with the glob of build/generated/*.cpp.
+# Included by CMakeLists.txt: defines one recompile target per game (gow2_add_recompile;
+# outside `all`, because it needs the user's game data) and the variables
+# <ID>_GENERATED_SOURCES with the glob of its generated *.cpp.
 #
 # Run with `cmake -P` (from the target): launches XenonRecomp, saves the output in
 # build/recomp.log and fails if check_recomp_log.py finds errors.
@@ -39,8 +39,8 @@ if(CMAKE_SCRIPT_MODE_FILE)
     endif()
     if(NOT EXISTS "${XEX}")
         message(FATAL_ERROR
-            "Recompile: ${XEX} not found. Extract the disc into game_data/ first "
-            "(see tools/extract).")
+            "Recompile: ${XEX} not found. Extract the disc into its game data folder first "
+            "(python tools/gow2.py build, see tools/extract).")
     endif()
     # If the TOML is not a regular file, XenonRecomp silently runs its internal
     # tests and exits with 0: this case must be excluded explicitly.
@@ -114,77 +114,104 @@ endif()
 # ---- configure mode ----
 find_package(Python3 COMPONENTS Interpreter)
 
-gow2_check_recomp_options("${CMAKE_SOURCE_DIR}/config/gow2.toml")
-set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/config/gow2.toml")
-
-set(GOW2_GENERATED_DIR "${CMAKE_SOURCE_DIR}/build/generated")
-set(GOW2_RECOMP_LOG "${CMAKE_SOURCE_DIR}/build/recomp.log")
-
 if(Python3_Interpreter_FOUND)
     set(_gow2_python "${Python3_EXECUTABLE}")
 else()
     set(_gow2_python "Python3-NOTFOUND")
 endif()
 
-add_custom_target(recompile
-    COMMAND "${CMAKE_COMMAND}"
-        "-DXENON_RECOMP=$<TARGET_FILE:XenonRecomp>"
-        "-DCONFIG=${CMAKE_SOURCE_DIR}/config/gow2.toml"
-        "-DPPC_CONTEXT=${CMAKE_SOURCE_DIR}/thirdparty/XenonRecomp/XenonUtils/ppc_context.h"
-        "-DGENERATED_DIR=${GOW2_GENERATED_DIR}"
-        "-DLOG=${GOW2_RECOMP_LOG}"
-        "-DPYTHON=${_gow2_python}"
-        "-DCHECKER=${CMAKE_SOURCE_DIR}/tools/check_recomp_log.py"
-        "-DXEX=${CMAKE_SOURCE_DIR}/game_data/default.xex"
-        -P "${CMAKE_CURRENT_LIST_DIR}/Recompile.cmake"
-    DEPENDS XenonRecomp
-    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
-    COMMENT "Recompiling default.xex with XenonRecomp"
-    USES_TERMINAL
-    VERBATIM)
-
-# Generated sources, for the game target (runtime/CMakeLists.txt). Empty
-# until `recompile` has been run; CONFIGURE_DEPENDS makes the glob repeat.
-file(GLOB GOW2_GENERATED_SOURCES CONFIGURE_DEPENDS "${GOW2_GENERATED_DIR}/*.cpp")
-
-# Stubs for the imports (__imp__Name) declared in ppc_recomp_shared.h and not
-# implemented in runtime/kernel/, runtime/gpu/, runtime/gpu_fake/, runtime/apu/ or
-# runtime/hid/ (KERNEL_EXPORT).
-# Regenerated on every new `recompile` run (they depend on the header) and
-# written to the build folder, never to build/generated (which `recompile`
-# cleans) nor to the repo. They only exist if the generated code is there.
-set(GOW2_IMPORT_STUBS "${CMAKE_BINARY_DIR}/import_stubs/import_stubs.cpp")
-if(EXISTS "${GOW2_GENERATED_DIR}/ppc_func_mapping.cpp" AND EXISTS "${GOW2_GENERATED_DIR}/ppc_recomp_shared.h")
-    set(GOW2_HAVE_GENERATED ON)
-    if(NOT Python3_Interpreter_FOUND)
-        message(FATAL_ERROR "Python 3 not found: needed for tools/gen_import_stubs.py")
+# gow2_add_recompile(<id> DATA_DIR <dir>): target that recompiles <dir>/default.xex with
+# games/<id>/<id>.toml (`recompile` for gow2, `recompile_<id>` for the others) and, in the
+# caller's scope, <ID>_GENERATED_DIR (build/generated for gow2, build/generated_<id> for the
+# others: it must match out_directory_path in the TOML), <ID>_RECOMP_LOG, <ID>_GENERATED_SOURCES,
+# <ID>_HAVE_GENERATED and <ID>_IMPORT_STUBS (with the <id>_import_stubs target).
+function(gow2_add_recompile id)
+    cmake_parse_arguments(PARSE_ARGV 1 _arg "" "DATA_DIR" "")
+    string(TOUPPER "${id}" _ID)
+    set(_toml "${CMAKE_SOURCE_DIR}/games/${id}/${id}.toml")
+    if(id STREQUAL "gow2")
+        set(_target recompile)
+        set(_generated "${CMAKE_SOURCE_DIR}/build/generated")
+        set(_log "${CMAKE_SOURCE_DIR}/build/recomp.log")
+        set(_stubs "${CMAKE_BINARY_DIR}/import_stubs/import_stubs.cpp")
+    else()
+        set(_target recompile_${id})
+        set(_generated "${CMAKE_SOURCE_DIR}/build/generated_${id}")
+        set(_log "${CMAKE_SOURCE_DIR}/build/recomp_${id}.log")
+        set(_stubs "${CMAKE_BINARY_DIR}/import_stubs_${id}/import_stubs.cpp")
     endif()
-    # Imports implemented with KERNEL_EXPORT in the .cpp files of runtime/kernel/,
-    # runtime/gpu/ (Vd*), runtime/gpu_fake/, runtime/apu/ (XAudio*) and runtime/hid/
-    # (XamInput*) get no stub: regenerated when those sources change
-    # (CONFIGURE_DEPENDS repeats the glob if any are added). A folder that
-    # does not exist is not passed to gen_import_stubs.py, which would
-    # reject it; the glob rechecks it.
-    set(_gow2_export_dirs kernel gpu gpu_fake apu hid)
-    set(_gow2_kernel_globs)
-    set(_gow2_implemented_from)
-    foreach(_dir IN LISTS _gow2_export_dirs)
-        list(APPEND _gow2_kernel_globs "${CMAKE_SOURCE_DIR}/runtime/${_dir}/*.cpp")
-        if(IS_DIRECTORY "${CMAKE_SOURCE_DIR}/runtime/${_dir}")
-            list(APPEND _gow2_implemented_from --implemented-from "${CMAKE_SOURCE_DIR}/runtime/${_dir}")
-        endif()
-    endforeach()
-    file(GLOB_RECURSE _gow2_kernel_sources CONFIGURE_DEPENDS ${_gow2_kernel_globs})
-    add_custom_command(
-        OUTPUT "${GOW2_IMPORT_STUBS}"
-        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tools/gen_import_stubs.py"
-            "${GOW2_GENERATED_DIR}/ppc_recomp_shared.h" "${GOW2_IMPORT_STUBS}"
-            ${_gow2_implemented_from}
-        DEPENDS "${GOW2_GENERATED_DIR}/ppc_recomp_shared.h" "${CMAKE_SOURCE_DIR}/tools/gen_import_stubs.py"
-            ${_gow2_kernel_sources}
-        COMMENT "Import stubs from ppc_recomp_shared.h"
+
+    gow2_check_recomp_options("${_toml}")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_toml}")
+
+    add_custom_target(${_target}
+        COMMAND "${CMAKE_COMMAND}"
+            "-DXENON_RECOMP=$<TARGET_FILE:XenonRecomp>"
+            "-DCONFIG=${_toml}"
+            "-DPPC_CONTEXT=${CMAKE_SOURCE_DIR}/thirdparty/XenonRecomp/XenonUtils/ppc_context.h"
+            "-DGENERATED_DIR=${_generated}"
+            "-DLOG=${_log}"
+            "-DPYTHON=${_gow2_python}"
+            "-DCHECKER=${CMAKE_SOURCE_DIR}/tools/check_recomp_log.py"
+            "-DXEX=${CMAKE_SOURCE_DIR}/${_arg_DATA_DIR}/default.xex"
+            -P "${CMAKE_SOURCE_DIR}/cmake/Recompile.cmake"
+        DEPENDS XenonRecomp
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        COMMENT "Recompiling ${_arg_DATA_DIR}/default.xex with XenonRecomp"
+        USES_TERMINAL
         VERBATIM)
-    add_custom_target(gow2_import_stubs DEPENDS "${GOW2_IMPORT_STUBS}")
-else()
-    set(GOW2_HAVE_GENERATED OFF)
-endif()
+
+    # Generated sources, for the game target (runtime/CMakeLists.txt). Empty
+    # until the recompile target has been run; CONFIGURE_DEPENDS makes the glob repeat.
+    file(GLOB _sources CONFIGURE_DEPENDS "${_generated}/*.cpp")
+
+    # Stubs for the imports (__imp__Name) declared in ppc_recomp_shared.h and not
+    # implemented in runtime/kernel/, runtime/gpu/, runtime/gpu_fake/, runtime/apu/ or
+    # runtime/hid/ (KERNEL_EXPORT).
+    # Regenerated on every new recompile run (they depend on the header) and
+    # written to the build folder, never to the generated folder (which the recompile
+    # target cleans) nor to the repo. They only exist if the generated code is there.
+    if(EXISTS "${_generated}/ppc_func_mapping.cpp" AND EXISTS "${_generated}/ppc_recomp_shared.h")
+        set(_have ON)
+        if(NOT Python3_Interpreter_FOUND)
+            message(FATAL_ERROR "Python 3 not found: needed for tools/gen_import_stubs.py")
+        endif()
+        # Imports implemented with KERNEL_EXPORT in the .cpp files of runtime/kernel/,
+        # runtime/gpu/ (Vd*), runtime/gpu_fake/, runtime/apu/ (XAudio*) and runtime/hid/
+        # (XamInput*) get no stub: regenerated when those sources change
+        # (CONFIGURE_DEPENDS repeats the glob if any are added). A folder that
+        # does not exist is not passed to gen_import_stubs.py, which would
+        # reject it; the glob rechecks it.
+        set(_export_dirs kernel gpu gpu_fake apu hid)
+        set(_kernel_globs)
+        set(_implemented_from)
+        foreach(_dir IN LISTS _export_dirs)
+            list(APPEND _kernel_globs "${CMAKE_SOURCE_DIR}/runtime/${_dir}/*.cpp")
+            if(IS_DIRECTORY "${CMAKE_SOURCE_DIR}/runtime/${_dir}")
+                list(APPEND _implemented_from --implemented-from "${CMAKE_SOURCE_DIR}/runtime/${_dir}")
+            endif()
+        endforeach()
+        file(GLOB_RECURSE _kernel_sources CONFIGURE_DEPENDS ${_kernel_globs})
+        add_custom_command(
+            OUTPUT "${_stubs}"
+            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tools/gen_import_stubs.py"
+                "${_generated}/ppc_recomp_shared.h" "${_stubs}"
+                ${_implemented_from}
+            DEPENDS "${_generated}/ppc_recomp_shared.h" "${CMAKE_SOURCE_DIR}/tools/gen_import_stubs.py"
+                ${_kernel_sources}
+            COMMENT "Import stubs from ${_generated}/ppc_recomp_shared.h"
+            VERBATIM)
+        add_custom_target(${id}_import_stubs DEPENDS "${_stubs}")
+    else()
+        set(_have OFF)
+    endif()
+
+    set(${_ID}_GENERATED_DIR "${_generated}" PARENT_SCOPE)
+    set(${_ID}_RECOMP_LOG "${_log}" PARENT_SCOPE)
+    set(${_ID}_GENERATED_SOURCES "${_sources}" PARENT_SCOPE)
+    set(${_ID}_HAVE_GENERATED ${_have} PARENT_SCOPE)
+    set(${_ID}_IMPORT_STUBS "${_stubs}" PARENT_SCOPE)
+endfunction()
+
+gow2_add_recompile(gow2 DATA_DIR game_data)
+gow2_add_recompile(gow3 DATA_DIR game_data_gow3)

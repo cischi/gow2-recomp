@@ -13,6 +13,9 @@
 #include <utility>
 #include <vector>
 
+#include <windows.h>
+#include <psapi.h>  // K32GetProcessMemoryInfo for the [perf] line
+
 #include "gpu/bmp.h"
 #include "gpu/gpu_system.h"
 #include "kernel/stats.h"
@@ -812,6 +815,18 @@ bool Presenter::Present() {
     }
   }
   if (shot && !EnsureReadback()) shot.reset();
+  CollectCaptureShots(false);
+  CaptureSlot* cap = nullptr;
+  if (pending_capture_) {
+    cap = AcquireCaptureSlot();
+    if (cap) {
+      cap->job = std::move(pending_capture_->first);
+      cap->queue = pending_capture_->second;
+    } else {
+      ++capture_dropped_;
+    }
+    pending_capture_.reset();
+  }
 
   const uint32_t index =
       (frame_gen_ ? frame_gen_->CurrentBufferIndex() : swap_chain_->GetCurrentBackBufferIndex()) % kBufferCount;
@@ -886,6 +901,40 @@ bool Presenter::Present() {
   const std::optional<UpscaleCapture> fg_capture = frame_gen_ ? capture_ : std::nullopt;
   capture_.reset();
   upscaled_last_ = upscaled;
+  // Every 10 s with an upscaler: frames it reconstructed out of those presented (the others had no capture).
+  if (upscaler_factory_) {
+    ++upscale_window_[1];
+    if (upscaled) ++upscale_window_[0];
+    const auto now = std::chrono::steady_clock::now();
+    if (upscale_window_start_ == std::chrono::steady_clock::time_point{}) upscale_window_start_ = now;
+    if (now - upscale_window_start_ >= std::chrono::seconds(10)) {
+      LogLine("[gpu] upscaler: last 10 s: upscaled " + std::to_string(upscale_window_[0]) + " of " +
+              std::to_string(upscale_window_[1]) + " frames");
+      upscale_window_[0] = upscale_window_[1] = 0;
+      upscale_window_start_ = now;
+    }
+  }
+  // Every 10 s: frames presented, longest gap between two of them (hitches) and the process working set.
+  {
+    const auto now = std::chrono::steady_clock::now();
+    if (perf_window_start_ == std::chrono::steady_clock::time_point{}) perf_window_start_ = perf_last_frame_ = now;
+    perf_longest_ = std::max(perf_longest_, now - perf_last_frame_);
+    perf_last_frame_ = now;
+    ++perf_frames_;
+    if (now - perf_window_start_ >= std::chrono::seconds(10)) {
+      PROCESS_MEMORY_COUNTERS mem{};
+      K32GetProcessMemoryInfo(GetCurrentProcess(), &mem, sizeof(mem));
+      char line[128];
+      std::snprintf(line, sizeof(line), "[perf] last 10 s: %llu frames, longest %.1f ms, working set %llu MB",
+                    static_cast<unsigned long long>(perf_frames_),
+                    std::chrono::duration<double, std::milli>(perf_longest_).count(),
+                    static_cast<unsigned long long>(mem.WorkingSetSize >> 20));
+      LogLine(line);
+      perf_frames_ = 0;
+      perf_longest_ = {};
+      perf_window_start_ = now;
+    }
+  }
   // Copy only at 1:1 without sharpening (there ChoosePaintEffect would give kCasSharpen).
   const bool guest = !upscaled && guest_output_valid_ && guest_output_;
   if (guest && (guest_width_ != width_ || guest_height_ != height_ || options_.sharpening)) {
@@ -924,7 +973,7 @@ bool Presenter::Present() {
 
   // HDR10 with the overlay open: copy of the SDR without overlay (the composition removes the residual there).
   bool pre_overlay = false;
-  if (hdr && overlay_ && overlay_->IsOpen()) {
+  if (hdr && overlay_ && overlay_->Visible()) {
     if (!hdr_pre_overlay_) {
       const D3D12_RESOURCE_DESC desc = hdr_sdr_->GetDesc();
       if (FAILED(provider_.GetDevice()->CreateCommittedResource(
@@ -941,7 +990,7 @@ bool Presenter::Present() {
     }
   }
 
-  if (overlay_ && overlay_->IsOpen()) {
+  if (overlay_ && overlay_->Visible()) {
     if (back_state != D3D12_RESOURCE_STATE_RENDER_TARGET) {
       b = Transition(back, back_state, D3D12_RESOURCE_STATE_RENDER_TARGET);
       list_->ResourceBarrier(1, &b);
@@ -950,9 +999,10 @@ bool Presenter::Present() {
     overlay_->Draw(provider_.GetDevice(), provider_.GetDirectQueue(), list_.Get(), rtv, width_, height_);
   }
 
-  const auto copy_to_readback = [&](ID3D12Resource* src, ID3D12Resource* readback) {
+  const auto copy_to_readback = [&](ID3D12Resource* src, ID3D12Resource* readback,
+                                    const D3D12_PLACED_SUBRESOURCE_FOOTPRINT* footprint = nullptr) {
     D3D12_TEXTURE_COPY_LOCATION dst{readback, D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT};
-    dst.PlacedFootprint = readback_footprint_;
+    dst.PlacedFootprint = footprint ? *footprint : readback_footprint_;
     D3D12_TEXTURE_COPY_LOCATION from{src, D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX};
     from.SubresourceIndex = 0;
     list_->CopyTextureRegion(&dst, 0, 0, 0, &from, nullptr);
@@ -973,11 +1023,12 @@ bool Presenter::Present() {
       list_->ResourceBarrier(1, &b);
     }
     back_state = kPs;
-    if (shot) {
+    if (shot || cap) {
       b = Transition(back, back_state, D3D12_RESOURCE_STATE_COPY_SOURCE);
       list_->ResourceBarrier(1, &b);
       back_state = D3D12_RESOURCE_STATE_COPY_SOURCE;
-      copy_to_readback(back, readback_.Get());
+      if (shot) copy_to_readback(back, readback_.Get());
+      if (cap) copy_to_readback(back, cap->buffer.Get(), &cap->footprint);
     }
     b = Transition(back, back_state, D3D12_RESOURCE_STATE_COMMON);
     list_->ResourceBarrier(1, &b);
@@ -990,11 +1041,12 @@ bool Presenter::Present() {
     }
   }
 
-  if (shot) {
+  if (shot || (cap && !hdr)) {
     b = Transition(back, back_state, D3D12_RESOURCE_STATE_COPY_SOURCE);
     list_->ResourceBarrier(1, &b);
     back_state = D3D12_RESOURCE_STATE_COPY_SOURCE;
-    copy_to_readback(back, hdr ? readback_pq_.Get() : readback_.Get());
+    if (shot) copy_to_readback(back, hdr ? readback_pq_.Get() : readback_.Get());
+    if (cap && !hdr) copy_to_readback(back, cap->buffer.Get(), &cap->footprint);
   }
 
   b = Transition(back, back_state, D3D12_RESOURCE_STATE_PRESENT);
@@ -1006,6 +1058,8 @@ bool Presenter::Present() {
   ID3D12CommandList* lists[] = {list_.Get()};
   provider_.GetDirectQueue()->ExecuteCommandLists(1, lists);
   allocator_fence_[index] = Signal();
+  if (cap) cap->fence = allocator_fence_[index];
+  if (wait_gpu_before_present_) WaitFor(allocator_fence_[index]);
 
   // Tearing only without vsync and if supported (swap chain flag); never in exclusive.
   const bool tearing = (swap_chain_flags_ & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) && !options_.vsync && !exclusive_;
@@ -1124,6 +1178,76 @@ void Presenter::FrameGenWithInputs(const UpscaleCapture& c, uint32_t slot, bool 
   back.push_back(Transition(motion_.Get(), kRead, kUav));
   back.push_back(Transition(reactive_.Get(), kRead, kUav));
   list_->ResourceBarrier(UINT(back.size()), back.data());
+}
+
+void Presenter::QueueCaptureShot(ImageJob job, ImageWriteQueue* queue) {
+  if (pending_capture_) ++capture_dropped_;
+  pending_capture_.emplace(std::move(job), queue);
+}
+
+void Presenter::FlushCaptureShots() { CollectCaptureShots(true); }
+
+Presenter::CaptureSlot* Presenter::AcquireCaptureSlot() {
+  CaptureSlot* slot = nullptr;
+  for (CaptureSlot& s : capture_slots_)
+    if (!s.fence) {
+      slot = &s;
+      break;
+    }
+  if (!slot) return nullptr;
+  const D3D12_RESOURCE_DESC desc = back_buffers_[0]->GetDesc();
+  UINT64 total = 0;
+  provider_.GetDevice()->GetCopyableFootprints(&desc, 0, 1, 0, &slot->footprint, nullptr, nullptr, &total);
+  if (slot->buffer && slot->size == total) return slot;
+  // Free slot: its last copy has completed, the buffer can be replaced.
+  slot->buffer.Reset();
+  D3D12_HEAP_PROPERTIES heap{D3D12_HEAP_TYPE_READBACK};
+  D3D12_RESOURCE_DESC buffer{};
+  buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+  buffer.Width = total;
+  buffer.Height = 1;
+  buffer.DepthOrArraySize = 1;
+  buffer.MipLevels = 1;
+  buffer.SampleDesc.Count = 1;
+  buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+  const HRESULT hr = provider_.GetDevice()->CreateCommittedResource(
+      &heap, D3D12_HEAP_FLAG_NONE, &buffer, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&slot->buffer));
+  if (FAILED(hr)) {
+    LogHr("CreateCommittedResource (capture readback)", hr);
+    slot->size = 0;
+    return nullptr;
+  }
+  slot->size = total;
+  return slot;
+}
+
+void Presenter::CollectCaptureShots(bool wait) {
+  for (CaptureSlot& s : capture_slots_) {
+    if (!s.fence) continue;
+    if (wait) WaitFor(s.fence);
+    if (fence_->GetCompletedValue() < s.fence) continue;
+    const D3D12_SUBRESOURCE_FOOTPRINT& fp = s.footprint.Footprint;
+    uint8_t* mapped = nullptr;
+    const HRESULT hr = s.buffer->Map(0, nullptr, reinterpret_cast<void**>(&mapped));
+    if (SUCCEEDED(hr)) {
+      s.job.width = fp.Width;
+      s.job.height = fp.Height;
+      s.job.pixels.resize(size_t(fp.Width) * fp.Height);
+      for (uint32_t y = 0; y < fp.Height; ++y) {
+        const auto* row = reinterpret_cast<const uint32_t*>(mapped + s.footprint.Offset + size_t(y) * fp.RowPitch);
+        for (uint32_t x = 0; x < fp.Width; ++x) s.job.pixels[size_t(y) * fp.Width + x] = ToXrgb8888(row[x]);
+      }
+      const D3D12_RANGE written{0, 0};
+      s.buffer->Unmap(0, &written);
+      if (s.queue) s.queue->Push(std::move(s.job));
+    } else {
+      LogHr("Capture readback map", hr);
+      ++capture_dropped_;
+    }
+    s.job = {};
+    s.queue = nullptr;
+    s.fence = 0;
+  }
 }
 
 void Presenter::SaveScreenshot(const std::filesystem::path& file, uint64_t frame, bool pq) {

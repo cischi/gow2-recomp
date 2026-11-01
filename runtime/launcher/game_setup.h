@@ -16,8 +16,10 @@ namespace launcher {
 enum class IsoCheck { kOk, kNotAnIso, kNoXex, kWrongEdition, kNoSpace };
 
 // kNoSpace when free_bytes < payload size + 256 MiB (slack for the marker and filesystem overhead).
-IsoCheck CheckIso(const std::filesystem::path& iso, uint64_t free_bytes,
-                  std::string_view expected = game_data::kExpectedXexSha256);
+IsoCheck CheckIso(const std::filesystem::path& iso, uint64_t free_bytes, std::string_view expected);
+
+// Extraction finished (marker present) and default.xex matches `expected`: Play is enabled.
+bool DataReady(const std::filesystem::path& dir, std::string_view expected);
 
 // Free bytes on the volume of `dir`, measured on its nearest existing ancestor; UINT64_MAX if it cannot be
 // measured (the space check is then skipped rather than blaming the user).

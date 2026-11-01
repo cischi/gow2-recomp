@@ -284,6 +284,14 @@ def test_bad_screenshot_exits_2(tmp_path, arg):
     assert not (tmp_path / "gow2.log").exists()
 
 
+def test_shader_capture_with_fake_gpu_exits_2(tmp_path):
+    proc = subprocess.run([str(_gow2_exe()), "--gpu", "fake", "--shader-capture"], cwd=tmp_path, capture_output=True,
+                          text=True, encoding="utf-8", errors="replace", timeout=60)
+    assert proc.returncode == 2, proc.stderr
+    assert "--shader-capture invalid with --gpu fake (no presenter)" in proc.stderr
+    assert not (tmp_path / "gow2.log").exists()
+
+
 def _windows_of(pid: int) -> list[int]:
     import ctypes
     from ctypes import wintypes

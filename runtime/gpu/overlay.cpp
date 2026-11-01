@@ -49,16 +49,29 @@ bool IsInputMessage(UINT msg) {
 }  // namespace
 
 std::unique_ptr<Overlay> Overlay::Create(plat::Window* window, std::filesystem::path config,
-                                         settings::Settings running, ApplyFn on_apply) {
+                                         settings::Settings running, ApplyFn on_apply,
+                                         ScreenshotFn on_screenshot, ToggleFn on_shader_capture) {
   std::unique_ptr<Overlay> o(new Overlay);
   o->window_ = window;
   o->hwnd_ = plat::NativeHandle(window);
   o->config_ = std::move(config);
   o->running_ = o->current_ = std::move(running);
   o->on_apply_ = std::move(on_apply);
+  o->on_screenshot_ = std::move(on_screenshot);
+  o->on_shader_capture_ = std::move(on_shader_capture);
   if (window) {
     Overlay* self = o.get();
     plat::SetMessageHook(window, [self](uint32_t msg, uintptr_t wp, intptr_t lp) -> std::optional<intptr_t> {
+      // F12 also with the panel open or disabled: the screenshot shows what is on screen.
+      if ((msg == WM_KEYDOWN || msg == WM_KEYUP) && wp == VK_F12 && self->on_screenshot_) {
+        if (msg == WM_KEYDOWN && !(lp & (1 << 30))) self->on_screenshot_();  // auto-repeat ignored
+        return 0;
+      }
+      // F11 (only with --shader-capture): starts/stops the shader capture, like F12 also with the panel open.
+      if ((msg == WM_KEYDOWN || msg == WM_KEYUP) && wp == VK_F11 && self->on_shader_capture_) {
+        if (msg == WM_KEYDOWN && !(lp & (1 << 30))) self->on_shader_capture_();
+        return 0;
+      }
       if (self->disabled_.load()) return std::nullopt;
       if (msg == WM_KEYDOWN && wp == VK_F1) {
         if (!(lp & (1 << 30))) {  // auto-repeat ignored
@@ -183,6 +196,7 @@ bool Overlay::Init(ID3D12Device* device, ID3D12CommandQueue* queue, std::string&
   state_.overlay = true;
   state_.windows_italian = launcher::WindowsUiIsItalian();
   state_.dlss_available = launcher::DlssBridgePresent(launcher::ExeDir());
+  state_.unavailable = launcher::UnavailableOptions();
   state_.dlss_download_available = launcher::DlssDownloadAvailable(launcher::ExeDir());
   std::tie(state_.desktop_w, state_.desktop_h) = plat::PrimaryMonitorSize();
   state_.fg_available = launcher::FrameGenerationDllsPresent(launcher::ExeDir());
@@ -197,9 +211,20 @@ bool Overlay::Init(ID3D12Device* device, ID3D12CommandQueue* queue, std::string&
   return true;
 }
 
+void Overlay::DrawRecordingIndicator() {
+  // Top-left, over everything; small: it also ends up in the capture's shots (the overlay is drawn before the copy).
+  ImDrawList* d = ImGui::GetForegroundDrawList();
+  const char* text = "REC shader";
+  const ImVec2 size = ImGui::CalcTextSize(text);
+  d->AddRectFilled(ImVec2(8, 8), ImVec2(20 + size.x + 8, 8 + size.y + 8), IM_COL32(0, 0, 0, 160), 4.0f);
+  d->AddCircleFilled(ImVec2(16, 12 + size.y / 2), 4.0f, IM_COL32(230, 30, 30, 255));
+  d->AddText(ImVec2(24, 12), IM_COL32(255, 255, 255, 255), text);
+}
+
 void Overlay::Draw(ID3D12Device* device, ID3D12CommandQueue* queue, ID3D12GraphicsCommandList* list,
                    D3D12_CPU_DESCRIPTOR_HANDLE rtv, uint32_t w, uint32_t h) {
-  if (disabled_.load() || !open_.load()) return;
+  const bool open = open_.load(), recording = recording_.load();
+  if (disabled_.load() || (!open && !recording)) return;
   if (!context_) {
     std::string why;
     if (!Init(device, queue, why)) {
@@ -210,6 +235,21 @@ void Overlay::Draw(ID3D12Device* device, ID3D12CommandQueue* queue, ID3D12Graphi
     }
   }
   ImGui::SetCurrentContext(context_);
+  if (!open) {
+    // Panel closed: only the indicator. No Win32 NewFrame (it would set the game's cursor) and no input.
+    ImGui_ImplDX12_NewFrame();
+    ImGuiIO& io = ImGui::GetIO();
+    io.DisplaySize = ImVec2(float(w), float(h));
+    io.DeltaTime = 1.0f / 60;
+    ImGui::NewFrame();
+    DrawRecordingIndicator();
+    ImGui::Render();
+    list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+    ID3D12DescriptorHeap* heaps[] = {heap_->heap.Get()};
+    list->SetDescriptorHeaps(1, heaps);
+    ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), list);
+    return;
+  }
   if (install_.valid() && install_.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
     const auto err = install_.get();
     state_.optiscaler_installing = false;
@@ -285,6 +325,7 @@ void Overlay::Draw(ID3D12Device* device, ID3D12CommandQueue* queue, ID3D12Graphi
   ImGui::NewFrame();
   const bool escape = !busy && ImGui::IsKeyPressed(ImGuiKey_Escape, false);
   const launcher::Action action = escape ? launcher::Action::kQuit : launcher::DrawSettings(state_);
+  if (recording) DrawRecordingIndicator();
   ImGui::Render();
   list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
   ID3D12DescriptorHeap* heaps[] = {heap_->heap.Get()};

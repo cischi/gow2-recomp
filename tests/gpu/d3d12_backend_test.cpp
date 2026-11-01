@@ -282,6 +282,7 @@ TEST_CASE("d3d12_backend: the Xenia cvars set by gow2 exist", "[gpu][d3d12]") {
                                     std::pair{"draw_resolution_scale_y", "1"},
                                     std::pair{"draw_resolution_scaled_texture_offsets", "true"},
                                     std::pair{"d3d12_submit_every_draws", "100"},
+                                    std::pair{"d3d12_submit_every_draws_scaled", "false"},
                                     std::pair{"gow2_clear_msaa_remap", "true"},
                                     std::pair{"gow2_resolve_fill_depth", "false"},
                                     std::pair{"draw_resolution_scale_threshold", "640"}}) {

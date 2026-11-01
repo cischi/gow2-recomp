@@ -131,6 +131,7 @@ struct Copier {
 
 // Default settings written at installation: every key must exist in the
 // given section. Preset=2 is the small model (DLL 310.9 only); F6/F7 = 0x75/0x76.
+// FinishedPicture: NR before SR flashes GoW3's dark menus with FG; the finished-picture seam does not.
 struct Preset { std::string_view section, key, value; };
 constexpr Preset kPresets[] = {
     {"[Upscalers]", "Dx12Upscaler", "dlss"},
@@ -142,6 +143,7 @@ constexpr Preset kPresets[] = {
     {"[Menu]", "FGShortcutKey", "0x76"},
     {"[DlssNr]", "Enabled", "true"},
     {"[DlssNr]", "RunBeforeSR", "true"},
+    {"[DlssNr]", "FinishedPicture", "true"},
     {"[DlssNr]", "Preset", "2"},
     {"[DlssNr]", "ReversibleMode", "7"},
     {"[DlssNr]", "WorkingScale", "0.75"},
@@ -207,6 +209,19 @@ std::string PatchIni(std::string_view ini) {
   for (bool d : done)
     if (!d) return std::string();  // unexpected file: empty, Install refuses
   return out;
+}
+
+bool NrEnabled(std::string_view ini) {
+  std::string_view section;
+  while (!ini.empty()) {
+    const size_t nl = ini.find('\n');
+    std::string_view text = ini.substr(0, nl);
+    ini.remove_prefix(nl == std::string_view::npos ? ini.size() : nl + 1);
+    if (!text.empty() && text.back() == '\r') text.remove_suffix(1);
+    if (text.starts_with('[')) section = text.substr(0, text.find(']') + 1);
+    if (section == "[DlssNr]" && (text == "Enabled = false" || text == "Enabled=false")) return false;
+  }
+  return true;
 }
 
 std::optional<std::string> HttpFetch(std::wstring_view url, const fs::path& dest) {

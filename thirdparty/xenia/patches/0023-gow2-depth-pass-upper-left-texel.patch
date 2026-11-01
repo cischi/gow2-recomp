@@ -1,0 +1,19 @@
+diff --git a/src/xenia/gpu/dxbc_shader_translator_fetch.cc b/src/xenia/gpu/dxbc_shader_translator_fetch.cc
+index a088a34..5fb8f8c 100644
+--- a/src/xenia/gpu/dxbc_shader_translator_fetch.cc
++++ b/src/xenia/gpu/dxbc_shader_translator_fetch.cc
+@@ -789,7 +789,13 @@ void DxbcShaderTranslator::ProcessTextureFetchInstruction(
+     // sampling apparently round differently, so `mul` gives a value that would
+     // be floored as expected, but the left/upper pixel is still sampled
+     // instead.
+-    const float rounding_offset = point_snap ? 0.0f : kTextureCoordEpsilon;
++    // gow2: depth-writing pixel shaders (GoW3's half-res occlusion query depth: min of 2x2 point fetches at
++    // exact texel boundaries) take the upper-left texel, the 2x2 footprint the half-res pixel covers; with the
++    // lower-right one the floors' query boxes fail against the floors themselves and the floors flash.
++    const float rounding_offset =
++        point_snap ? 0.0f
++                   : (is_pixel_shader() && current_shader().writes_depth() ? -kTextureCoordEpsilon
++                                                                           : kTextureCoordEpsilon);
+     switch (coordinate_dimension) {
+       case xenos::FetchOpDimension::k1D:
+         offsets[0] = instr.attributes.offset_x + rounding_offset;

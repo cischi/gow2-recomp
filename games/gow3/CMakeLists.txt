@@ -1,0 +1,8 @@
+# gow3_game: Gears of War 3 profile. Expected SHA-256 of the decrypted default.xex image from expected_xex.json.
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/expected_xex.json" _gow3_expected_json)
+string(JSON _gow3_xex_sha256 GET "${_gow3_expected_json}" image_sha256)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/expected_xex.json")
+add_library(gow3_game STATIC profile.cpp patches.cpp)
+target_include_directories(gow3_game PUBLIC ${CMAKE_SOURCE_DIR}/runtime)
+target_compile_definitions(gow3_game PRIVATE GAME_XEX_SHA256="${_gow3_xex_sha256}")
+target_link_libraries(gow3_game PRIVATE XenonUtils)  # ppc_context.h for the Gow3Patch* hooks

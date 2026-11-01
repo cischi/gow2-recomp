@@ -1,10 +1,13 @@
 # Copyrighted material: never in the repo
 Gears of War 2 \[360\]/
+Gears of War 3 \[360\]/
 *.iso
 *.xex
 game_data/
+game_data_gow3/
 # Saves and caches written by the runtime
 user_data/
+user_data_gow3/
 # Build output and code generated from the user's game
 build/
 out/
@@ -25,3 +28,5 @@ CLAUDE.md
 .claude/
 .pytest_cache/
 dist/
+# Shader capture recordings (--shader-capture): derived from the game
+shader_captures/

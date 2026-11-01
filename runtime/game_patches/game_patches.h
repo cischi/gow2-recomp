@@ -1,5 +1,6 @@
 // Game patches (graphics): table, data patches and verification at startup.
-// Code patches are hooks in the recompiled code (midasm_hook in config/gow2.toml) that read Enabled().
+// Code patches are hooks in the recompiled code (midasm_hook in games/<id>/<id>.toml) that read Enabled().
+// The table and the hooks are per game (games/<id>/patches.cpp); verification and flags are shared.
 // Table rewritten as our own code from the xenia-canary/game-patches patches (no declared
 // license); the authors are credited next to each entry.
 #pragma once
@@ -34,6 +35,7 @@ struct Patch {
   std::vector<DataWrite> data;
   std::vector<CodeHook> hooks;
   bool internal = false;  // patch driven by [game] frame_rate or by [engine], not by [patches]: outside settings::kPatchKeys
+  bool available = true;  // false: the game has no such patch (Apply skips it, the launcher disables its option)
 };
 
 // Keys of the internal patches (passed to Apply like the others).
@@ -50,11 +52,15 @@ enum PatchId : int {
 
 // Present interval read by the hook (atomic; default 2 = the original).
 void SetPresentInterval(uint32_t interval);
+uint32_t PresentInterval();
 
 // Turns off a patch's flag (fallback to 30 fps) without a second Apply, which would find the bytes already written.
 void Disable(int id);
 
-std::span<const Patch> All();
+// Per-game table, defined in games/<id>/patches.cpp: kPatchCount entries, entry i with the key of PatchId i.
+std::span<const Patch> Table();
+std::span<const Patch> All();  // Table()
+bool Available(int id);         // All()[id].available
 
 // Verifies the patches requested in `enabled` (by key) on the image loaded in `mem`, writes the
 // data and turns the flags on. Returns the log lines.

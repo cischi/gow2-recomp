@@ -1,0 +1,32 @@
+diff --git a/src/xenia/gpu/d3d12/d3d12_command_processor.cc b/src/xenia/gpu/d3d12/d3d12_command_processor.cc
+index 2d699d9..39af011 100644
+--- a/src/xenia/gpu/d3d12/d3d12_command_processor.cc
++++ b/src/xenia/gpu/d3d12/d3d12_command_processor.cc
+@@ -56,6 +56,11 @@ DEFINE_uint32(d3d12_submit_every_draws, 0,
+               "to submit immediately, so the GPU starts earlier (0 = only at "
+               "primary buffer ends and swaps).",
+               "D3D12");
++// gow2: patch 0020, d3d12_submit_every_draws at any resolution scale.
++DEFINE_bool(d3d12_submit_every_draws_scaled, false,
++            "Apply d3d12_submit_every_draws also with a draw resolution scale "
++            "above 1 (by default only at 1x).",
++            "D3D12");
+ 
+ DECLARE_bool(clear_memory_page_state);
+ DECLARE_bool(readback_resolve_half_pixel_offset);
+@@ -3520,10 +3525,13 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
+   // across submissions brings back blue armor (6/18 frames at 3x, 4 of 4 runs).
+   // shortcut: the cause in the counts at scale > 1 is not found; if it is,
+   // remove the scale check.
++  // gow2: patch 0020, d3d12_submit_every_draws_scaled also splits at scale > 1,
++  // for games where the GPU is not full there (GoW3 3x: 66 -> 88 fps).
+   if (cvars::d3d12_submit_every_draws &&
+       ++gow2_draws_in_submission_ >= cvars::d3d12_submit_every_draws &&
+-      texture_cache_->draw_resolution_scale_x() == 1 &&
+-      texture_cache_->draw_resolution_scale_y() == 1 &&
++      (cvars::d3d12_submit_every_draws_scaled ||
++       (texture_cache_->draw_resolution_scale_x() == 1 &&
++        texture_cache_->draw_resolution_scale_y() == 1)) &&
+       CanEndSubmissionImmediately()) {
+     EndSubmission(false);
+   }

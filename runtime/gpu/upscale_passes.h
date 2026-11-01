@@ -15,9 +15,13 @@
 
 namespace gpu {
 
-// Uber post pixel shader constants used by the motion vectors (registers c2, c13..c17).
+// Post constants used by the motion vectors, in the layout of GoW2's uber post (registers c2, c13..c17; other games
+// map theirs in, see game_profile::PostCapture): c2 depth linearization, c13..c16 reprojection, c17.xy NDC -> UV
+// blur scale and .zw its divisor for the dynamic objects' velocity.
 struct UberPostConstants {
   float c2[4], c13[4], c14[4], c15[4], c16[4], c17[4];
+  // SRV component mapping of the velocity buffer: 0 = default view.
+  uint32_t velocity_mapping = 0;
 };
 
 // Still camera: exactly identical rotation and translation within the game's rounding (with the camera
@@ -54,7 +58,7 @@ class UpscalePasses {
   // nullptr (with a [gpu] line) if the root signature, pipeline or heap cannot be created.
   static std::unique_ptr<UpscalePasses> Create(ID3D12Device* device);
 
-  // depth R32_FLOAT and velocity R16G16 (UNORM) in NON_PIXEL_SHADER_RESOURCE; mv R16G16_FLOAT in
+  // depth R32_FLOAT and velocity R16G16 (UNORM; any format with k.velocity_mapping) in NON_PIXEL_SHADER_RESOURCE; mv R16G16_FLOAT in
   // UNORDERED_ACCESS, same size as depth. States unchanged.
   void MotionVectors(ID3D12GraphicsCommandList* cmd, ID3D12Resource* depth, ID3D12Resource* velocity,
                      ID3D12Resource* mv, const UberPostConstants& k, uint32_t slot);

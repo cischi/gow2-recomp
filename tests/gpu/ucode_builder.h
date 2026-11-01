@@ -121,6 +121,13 @@ inline Instr TextureFetch2D(uint32_t dst_reg, uint32_t src_reg, uint32_t fetch_c
   return in;
 }
 
+// getWeights2D rDst, rSrc.xy, tf<fetch_constant>: the same encoding as tfetch2D with the opcode changed.
+inline Instr TextureWeights2D(uint32_t dst_reg, uint32_t src_reg, uint32_t fetch_constant) {
+  Instr in = TextureFetch2D(dst_reg, src_reg, fetch_constant);
+  in.dwords[0] = (in.dwords[0] & ~0x1Fu) | uint32_t(FetchOpcode::kGetTextureWeights);
+  return in;
+}
+
 // ALU source: temporary register or float constant, identity swizzle.
 struct AluSrc {
   bool temp;
@@ -227,6 +234,15 @@ inline std::vector<uint32_t> PsTexture2D() {
   return Assemble({CfAlloc(AllocType::kPsColors, 0),
                    CfExec(true, FirstInstr(2), 2, Seq({kSeqFetch, kSeqAluSerialize}))},
                   {TextureFetch2D(0, 0, 0), AluExportMov(ExportRegister::kPSColor0, R(0))});
+}
+
+// PS: tfetch2D r0, r0.xy, tf0; mov oC0, r0; mov oDepth, r0 (a depth-writing pass, like GoW3's
+// occlusion query depth downsample).
+inline std::vector<uint32_t> PsTexture2DWritingDepth() {
+  return Assemble({CfAlloc(AllocType::kPsColors, 0),
+                   CfExec(true, FirstInstr(2), 3, Seq({kSeqFetch, kSeqAluSerialize, kSeqAlu}))},
+                  {TextureFetch2D(0, 0, 0), AluExportMov(ExportRegister::kPSColor0, R(0)),
+                   AluExportMov(ExportRegister::kPSDepth, R(0))});
 }
 
 // VS: vfetch r0.xyz1 <- vf3 (texture 0 takes up vf0-vf2), tfetch2D r1, r0.xy, tf0 with gradients from a register (the only

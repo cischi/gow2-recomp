@@ -49,8 +49,8 @@ struct Edit {
 // In the order shadow_quality, dynamic_shadows; empty with Engine{}.
 std::vector<Edit> EditsFor(const settings::Engine& e);
 
-// Applies `edits` to [SystemSettings] of the *Xe-GearEngine.ini file (case-insensitive, first
-// occurrence). All or nothing: on error `files` is left unchanged and the text is the reason.
+// Applies `edits` to [SystemSettings] of the *-GearEngine.ini file (Xe-GearEngine.ini, Xbox360-GearEngine.ini;
+// case-insensitive, first occurrence). All or nothing: on error `files` is left unchanged and the text is the reason.
 // On success one entry per edit: "MaxShadowResolution 800 -> 2048".
 std::expected<std::vector<std::string>, std::string> ApplyEdits(std::vector<IniFile>& files,
                                                                 std::span<const Edit> edits);

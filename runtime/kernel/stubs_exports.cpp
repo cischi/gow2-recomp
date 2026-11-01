@@ -530,7 +530,7 @@ uint32_t XamVoiceCreateImpl(uint32_t, uint32_t, uint32_t out_voice) {
   if (be<uint32_t>* p = P32(out_voice)) *p = 0;
   return kErrorAccessDenied;
 }
-// Xenia: XamVoiceClose_entry / XamVoiceHeadsetPresent_entry (0).
+// Xenia: XamVoiceClose_entry / XamVoiceHeadsetPresent_entry / XamVoiceIsActiveProcess_entry (0).
 uint32_t XamVoiceZeroImpl(uint32_t /*voice*/) { return 0; }
 // XamVoiceSubmitPacket: no counterpart in Xenia; no device.
 uint32_t XamVoiceSubmitPacketImpl(uint32_t, uint32_t, uint32_t) { return kErrorDeviceNotConnected; }
@@ -592,4 +592,5 @@ KERNEL_EXPORT(NetDll_WSAWaitForMultipleEvents, kernel::stubs::NetDllWSAWaitForMu
 KERNEL_EXPORT(XamVoiceCreate, kernel::stubs::XamVoiceCreateImpl)
 KERNEL_EXPORT(XamVoiceClose, kernel::stubs::XamVoiceZeroImpl)
 KERNEL_EXPORT(XamVoiceHeadsetPresent, kernel::stubs::XamVoiceZeroImpl)
+KERNEL_EXPORT(XamVoiceIsActiveProcess, kernel::stubs::XamVoiceZeroImpl)
 KERNEL_EXPORT(XamVoiceSubmitPacket, kernel::stubs::XamVoiceSubmitPacketImpl)

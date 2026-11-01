@@ -3,7 +3,7 @@
 // The two libraries include XenonUtils' ppc_context.h without the generated
 // ppc_config.h (kernel/function.h defines PPC_CONFIG_H_INCLUDED), while the
 // recompiled code uses build/generated/ppc_config.h: a skip_* / *_as_local
-// option enabled in config/gow2.toml would remove fields from the generated
+// option enabled in games/gow2/gow2.toml would remove fields from the generated
 // code's PPCContext and the kernel would silently read r3, f1, lr... at the
 // wrong offsets.
 //
@@ -12,7 +12,7 @@
 // kernel/function.h (so by every TU of the kernel, the fake GPU and the runtime
 // that includes it) and by runtime/recomp_glue.cpp, which sees the generated
 // ppc_config.h: if the two layouts diverge, one of the two sides fails to compile.
-// CMake also rejects skip_* / *_as_local options in config/gow2.toml
+// CMake also rejects skip_* / *_as_local options in games/gow2/gow2.toml
 // (cmake/Recompile.cmake) until the kernel supports them.
 #pragma once
 

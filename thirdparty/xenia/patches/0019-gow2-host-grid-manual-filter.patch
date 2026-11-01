@@ -1,0 +1,99 @@
+diff --git a/src/xenia/gpu/dxbc_shader_translator_fetch.cc b/src/xenia/gpu/dxbc_shader_translator_fetch.cc
+index b12ec9e..a088a34 100644
+--- a/src/xenia/gpu/dxbc_shader_translator_fetch.cc
++++ b/src/xenia/gpu/dxbc_shader_translator_fetch.cc
+@@ -1030,8 +1030,47 @@ void DxbcShaderTranslator::ProcessTextureFetchInstruction(
+           dxbc::Src::R(size_and_is_3d_temp));
+     }
+   }
++  // gow2: patch 0019, a fetch constant whose weights the shader queries
++  // (getWeights2D) is filtered by hand: point taps at the offsets of the tfetch
++  // instructions blended with the weights. On a resolution-scaled texture the
++  // taps (offsets in host texels) and the weights (host texel fractions) stay
++  // on the same grid, otherwise the taps switch host texel in the middle of a
++  // guest texel while the weights do not (banded shadows in Gears of War 3's
++  // PCF). Only if the constant has both tfetch and getWeights2D and every
++  // fetch on it reads the same coordinate XY operand, so the taps differ only
++  // by instruction offsets (which are rescaled); taps computed in ALU stay in
++  // guest texels and keep upstream's guest-grid weights.
++  // shortcut: the operand is compared by register number, not by value (a
++  // register rewritten between the fetches still matches), upgrade to a data
++  // flow check if a title matches with ALU-computed taps.
++  bool gow2_host_grid_filter = false;
++  if (draw_resolution_scale_x_ > 1 || draw_resolution_scale_y_ > 1) {
++    const InstructionOperand* gow2_coord = nullptr;
++    bool gow2_same_coord = true, gow2_has_weights = false, gow2_has_taps = false;
++    for (const Shader::TextureBinding& binding :
++         current_shader().texture_bindings()) {
++      const ParsedTextureFetchInstruction& fetch = binding.fetch_instr;
++      if (binding.fetch_constant != tfetch_index ||
++          (fetch.opcode != FetchOpcode::kTextureFetch &&
++           fetch.opcode != FetchOpcode::kGetTextureWeights)) {
++        continue;
++      }
++      if (!gow2_coord) {
++        gow2_coord = &fetch.operands[0];
++      } else if ((fetch.operands[0].GetIdenticalComponents(*gow2_coord) &
++                  0b0011) != 0b0011) {
++        gow2_same_coord = false;
++      }
++      if (fetch.opcode == FetchOpcode::kTextureFetch) {
++        gow2_has_taps = true;
++      } else {
++        gow2_has_weights |= fetch.dimension == xenos::FetchOpDimension::k2D;
++      }
++    }
++    gow2_host_grid_filter = gow2_has_weights && gow2_has_taps && gow2_same_coord;
++  }
+   uint32_t revert_resolution_scale_axes =
+-      cvars::draw_resolution_scaled_texture_offsets
++      cvars::draw_resolution_scaled_texture_offsets || gow2_host_grid_filter
+           ? uint32_t(draw_resolution_scale_x_ > 1) |
+                 (uint32_t(draw_resolution_scale_y_ > 1) << 1)
+           : 0;
+@@ -1054,14 +1093,43 @@ void DxbcShaderTranslator::ProcessTextureFetchInstruction(
+     // Resolution scale is NOT applied for GetTextureWeights - weights are
+     // calculated from fractional parts of coordinates which should be in guest
+     // texel space, not host texel space. Games expect weights based on guest
+-    // texture dimensions.
++    // texture dimensions. gow2: except for patch 0019's manual filter, below.
+     bool coord_operand_temp_pushed = false;
+     dxbc::Src coord_operand =
+         LoadOperand(instr.operands[0], used_result_nonzero_components,
+                     coord_operand_temp_pushed);
+     dxbc::Src coord_src(coord_operand);
+     uint32_t offsets_needed = offsets_not_zero & used_result_nonzero_components;
+-    if (!instr.attributes.unnormalized_coordinates || offsets_needed) {
++    if (gow2_host_grid_filter) {
++      // gow2: patch 0019, weights in host texels if the texture is scaled:
++      // (coordinate in guest texels * scale + offset).
++      coord_src = dxbc::Src::R(system_temp_result_);
++      dxbc::Dest coord_dest(
++          dxbc::Dest::R(system_temp_result_, used_result_nonzero_components));
++      if (instr.attributes.unnormalized_coordinates) {
++        a_.OpMov(coord_dest, coord_operand);
++      } else {
++        assert_true((size_needed_components & used_result_nonzero_components) ==
++                    used_result_nonzero_components);
++        a_.OpMul(coord_dest, coord_operand, dxbc::Src::R(size_and_is_3d_temp));
++      }
++      uint32_t scaled_temp = PushSystemTemp();
++      a_.OpAnd(dxbc::Dest::R(scaled_temp, 0b0001),
++               LoadSystemConstant(
++                   SystemConstants::Index::kTexturesResolutionScaled,
++                   offsetof(SystemConstants, textures_resolution_scaled),
++                   dxbc::Src::kXXXX),
++               dxbc::Src::LU(uint32_t(1) << tfetch_index));
++      a_.OpIf(true, dxbc::Src::R(scaled_temp, dxbc::Src::kXXXX));
++      a_.OpMul(coord_dest, coord_src,
++               dxbc::Src::LF(float(draw_resolution_scale_x_),
++                             float(draw_resolution_scale_y_), 1.0f, 1.0f));
++      a_.OpEndIf();
++      PopSystemTemp();
++      if (offsets_needed) {
++        a_.OpAdd(coord_dest, coord_src, offsets_src);
++      }
++    } else if (!instr.attributes.unnormalized_coordinates || offsets_needed) {
+       // Using system_temp_result_ as a temporary for coordinate denormalization
+       // and offsetting.
+       coord_src = dxbc::Src::R(system_temp_result_);

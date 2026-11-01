@@ -130,6 +130,11 @@ DEFINE_bool(
 namespace xe {
 namespace gpu {
 
+// gow2: ZPD observer (set by the runtime).
+static std::atomic<ZPDObserverHook> zpd_observer_hook{nullptr};
+
+void SetZPDObserverHook(ZPDObserverHook hook) { zpd_observer_hook.store(hook); }
+
 // This should be written completely differently with support for different
 // types.
 void SaveGPUSetting(GPUSetting setting, uint64_t value) {
@@ -1104,6 +1109,10 @@ void CommandProcessor::QueueZPDReport(uint32_t report_address) {
   }
   zpd_awaited_report_count_ += report.awaited;
   zpd_reports_.push_back(report);
+  // gow2: the shader capture sees the report in command order.
+  if (ZPDObserverHook hook = zpd_observer_hook.load()) {
+    hook(false, report.handle, report_address, 0, 0);
+  }
 
   // The next report's segment opens at its first draw.
   // Report runs without draws between them never use any pool slots.
@@ -1355,6 +1364,11 @@ void CommandProcessor::PumpPendingRetire() {
     zpd_pending_retire_start_ms_ = 0;
 
     zpd_sample_counter_ += front.delta;
+    // gow2: the shader capture sees the report's samples.
+    if (ZPDObserverHook hook = zpd_observer_hook.load()) {
+      hook(true, front.handle, front.address, front.delta.z_pass,
+           front.delta.z_fail);
+    }
     if (front.speculative) {
       if (fast_zpd_report_cached_deltas_.size() >= kFastZPDCacheMaxEntries &&
           !fast_zpd_report_cached_deltas_.count(front.address)) {

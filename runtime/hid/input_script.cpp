@@ -69,6 +69,10 @@ std::optional<ScriptEvent> ParseEvent(std::string_view item) {
   if (rest == "LS_RIGHT") return ScriptEvent{*at, 0, hold, 32767, 0};
   if (rest == "LT") return ScriptEvent{*at, 0, hold, 0, 0, 255, 0};
   if (rest == "RT") return ScriptEvent{*at, 0, hold, 0, 0, 0, 255};
+  if (rest == "RS_UP") return ScriptEvent{*at, 0, hold, 0, 0, 0, 0, 0, 32767};
+  if (rest == "RS_DOWN") return ScriptEvent{*at, 0, hold, 0, 0, 0, 0, 0, -32767};
+  if (rest == "RS_LEFT") return ScriptEvent{*at, 0, hold, 0, 0, 0, 0, -32767, 0};
+  if (rest == "RS_RIGHT") return ScriptEvent{*at, 0, hold, 0, 0, 0, 0, 32767, 0};
   return std::nullopt;
 }
 

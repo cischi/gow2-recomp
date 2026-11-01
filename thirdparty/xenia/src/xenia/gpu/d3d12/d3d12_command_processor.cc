@@ -56,6 +56,11 @@ DEFINE_uint32(d3d12_submit_every_draws, 0,
               "to submit immediately, so the GPU starts earlier (0 = only at "
               "primary buffer ends and swaps).",
               "D3D12");
+// gow2: patch 0020, d3d12_submit_every_draws at any resolution scale.
+DEFINE_bool(d3d12_submit_every_draws_scaled, false,
+            "Apply d3d12_submit_every_draws also with a draw resolution scale "
+            "above 1 (by default only at 1x).",
+            "D3D12");
 
 DECLARE_bool(clear_memory_page_state);
 DECLARE_bool(readback_resolve_half_pixel_offset);
@@ -63,6 +68,13 @@ DECLARE_bool(readback_resolve_half_pixel_offset);
 namespace xe {
 namespace gpu {
 namespace d3d12 {
+
+// gow2: draw observer (set by the runtime).
+static std::atomic<DrawObserverHook> draw_observer_hook{nullptr};
+
+void SetDrawObserverHook(DrawObserverHook hook) {
+  draw_observer_hook.store(hook);
+}
 
 // Generated with `xb buildshaders`.
 namespace shaders {
@@ -3053,11 +3065,19 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
           vertex_shader->ucode_data_hash(), vertex_shader_modification.value,
           pixel_shader ? pixel_shader->ucode_data_hash() : 0,
           pixel_shader_modification.value);
+      // gow2: the shader capture sees the skipped draw.
+      if (DrawObserverHook hook = draw_observer_hook.load()) {
+        hook(*vertex_shader_translation, pixel_shader_translation, true);
+      }
       OnVIZSurveyDraw(false);
       return true;
     }
     // Re-fetch root signature now that pipeline is ready.
     root_signature = pipeline_cache_->GetRootSignatureByHandle(pipeline_handle);
+  }
+  // gow2: the shader capture sees the issued draw.
+  if (DrawObserverHook hook = draw_observer_hook.load()) {
+    hook(*vertex_shader_translation, pixel_shader_translation, false);
   }
 
   // Update the textures - this may bind pipelines.
@@ -3108,25 +3128,23 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
   // positions (patch 0009).
   gviargs.msaa_2x_sample_0_to_console =
       host_render_targets_used && !xenos_sample_positions_used_;
-  // gow2: upscaler jitter on draws with a depth test on the scene
-  // surfaces (2x MSAA geometry and 1x lights with the same pitch, which
-  // test the geometry's depth), not on depth restores from a texture
-  // (pixel shader writing depth with an ALWAYS test: the texture already
-  // holds the shifted geometry) nor on shadow maps and surfaces of
-  // another size; the serial number in padding_set_to_0 invalidates the
-  // cached viewport when the jitter changes (patch 0013).
-  // gow2: the same predicate selects the LOD bias draws (patch 0014).
-  gow2_scene_draw_ =
-      normalized_depth_control.z_enable &&
-      regs.Get<reg::RB_SURFACE_INFO>().surface_pitch == gow2_jitter_pitch_ &&
-      // gow2: the remapped Clear (patch 0017) stays without jitter, as at 4x.
-      !gow2_clear_remap.applied() &&
-      !(pixel_shader && pixel_shader->writes_depth() &&
-        normalized_depth_control.zfunc == xenos::CompareFunction::kAlways);
+  // gow2: upscaler jitter on the scene surfaces (2x MSAA geometry and 1x
+  // lights with the same pitch, which test the geometry's depth) and half of
+  // it on the occlusion query boxes (draw_util::Gow2JitterScale); the serial
+  // number in padding_set_to_0 invalidates the cached viewport when the
+  // jitter changes (patch 0013).
+  // gow2: the scene draws (scale 1) are also the LOD bias draws (patch 0014).
+  const float gow2_jitter_scale = draw_util::Gow2JitterScale(
+      normalized_depth_control.z_enable, normalized_depth_control.z_write_enable,
+      normalized_depth_control.zfunc,
+      pixel_shader && pixel_shader->writes_depth(),
+      regs.Get<reg::RB_SURFACE_INFO>().surface_pitch, gow2_jitter_pitch_,
+      regs[XE_GPU_REG_RB_COLOR_MASK], gow2_clear_remap.applied());
+  gow2_scene_draw_ = gow2_jitter_scale == 1.0f;
   if ((gow2_jitter_xy_[0] != 0.0f || gow2_jitter_xy_[1] != 0.0f) &&
-      gow2_scene_draw_) {
-    gviargs.gow2_jitter_xy[0] = gow2_jitter_xy_[0];
-    gviargs.gow2_jitter_xy[1] = gow2_jitter_xy_[1];
+      gow2_jitter_scale != 0.0f) {
+    gviargs.gow2_jitter_xy[0] = gow2_jitter_xy_[0] * gow2_jitter_scale;
+    gviargs.gow2_jitter_xy[1] = gow2_jitter_xy_[1] * gow2_jitter_scale;
     gviargs.padding_set_to_0 = gow2_jitter_serial_;
   }
 
@@ -3520,10 +3538,13 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
   // across submissions brings back blue armor (6/18 frames at 3x, 4 of 4 runs).
   // shortcut: the cause in the counts at scale > 1 is not found; if it is,
   // remove the scale check.
+  // gow2: patch 0020, d3d12_submit_every_draws_scaled also splits at scale > 1,
+  // for games where the GPU is not full there (GoW3 3x: 66 -> 88 fps).
   if (cvars::d3d12_submit_every_draws &&
       ++gow2_draws_in_submission_ >= cvars::d3d12_submit_every_draws &&
-      texture_cache_->draw_resolution_scale_x() == 1 &&
-      texture_cache_->draw_resolution_scale_y() == 1 &&
+      (cvars::d3d12_submit_every_draws_scaled ||
+       (texture_cache_->draw_resolution_scale_x() == 1 &&
+        texture_cache_->draw_resolution_scale_y() == 1)) &&
       CanEndSubmissionImmediately()) {
     EndSubmission(false);
   }

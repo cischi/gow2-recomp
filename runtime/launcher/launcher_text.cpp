@@ -1,5 +1,10 @@
 #include "launcher/launcher_text.h"
 
+#include <cstring>
+#include <utility>
+
+#include "game_profile.h"
+
 namespace launcher {
 namespace {
 
@@ -37,13 +42,13 @@ constexpr UiText kItalian{
     "AMD FSR 3: un frame generato fra due reali, circa il doppio dei frame a schermo. Frame rate conta i frame reali; "
     "con la frame generation restano sotto met\xC3\xA0 della frequenza del monitor. Aggiunge circa un frame di latenza. "
     "Lo schermo intero diventa borderless. Accesa vale dal prossimo avvio; spenta vale subito.",
-    "Non disponibile: manca amd_fidelityfx_framegeneration_dx12.dll accanto a gow2.exe",
+    "Non disponibile: manca amd_fidelityfx_framegeneration_dx12.dll accanto a {exe}",
     "Frame generation",
     "Spenta",
     "NVIDIA DLSS: un frame generato fra due reali. Serve una RTX 40 o successiva. Circa un frame di latenza in più. "
     "Il preset (A, B, C) si sceglie dalla NVIDIA App, non dal gioco. Lo schermo intero diventa borderless. "
     "Accesa vale dal prossimo avvio; spenta vale subito.",
-    "Non disponibile: mancano gow2_dlss.dll o nvngx_dlssg.dll accanto a gow2.exe",
+    "Non disponibile: mancano gow2_dlss.dll o nvngx_dlssg.dll accanto a {exe}",
     "Spenta perché OptiScaler è installato: la frame generation si sceglie dal menu di OptiScaler.",
     "Formato",
     "16:9 \xC3\xA8 l'originale. 21:9 allarga il campo visivo (scena 1280x550; HUD e men\xC3\xB9 interi, filmati con bande "
@@ -90,7 +95,7 @@ constexpr UiText kItalian{
     "Rendering neurale",
     "Installa OptiScaler",
     "Sostituisci con la %s",
-    "Scarica OptiScaler %s (fork F5, GPL-3) da GitHub e lo mette accanto a gow2.exe. Il rendering neurale richiede "
+    "Scarica OptiScaler %s (fork F5, GPL-3) da GitHub e lo mette accanto a {exe}. Il rendering neurale richiede "
     "nvngx_dlssnr.dll, da procurarsi a parte. Il launcher si riavvia: le modifiche non salvate vanno perse.",
     " Sovrascrive l'OptiScaler presente.",
     "Apri OptiScaler",
@@ -98,27 +103,29 @@ constexpr UiText kItalian{
     "Installato: riavvia il gioco",
     "Installazione...",
     "dxgi.dll di un altro programma: OptiScaler non si installa",
-    "Il rendering neurale richiede nvngx_dlssnr.dll accanto a gow2.exe (nvngx_dlssnr.dll non fornita dal progetto).",
+    "Il rendering neurale richiede nvngx_dlssnr.dll accanto a {exe} (nvngx_dlssnr.dll non fornita dal progetto).",
     "OptiScaler applica il rendering neurale solo con DLSS.",
     "Riavvio automatico non riuscito: riavvia a mano.",
     "Dati del gioco",
     "Dati del gioco pronti.",
-    "Dati del gioco mancanti: scegli la tua ISO di Gears of War 2 (PAL Europa).",
+    "Dati del gioco mancanti: scegli la tua ISO di {game} ({edition}).",
     "Scegli ISO...",
     "Estrazione in corso...",
     "Annulla",
     "Il file non è un'immagine ISO Xbox 360 valida.",
     "L'ISO non contiene default.xex.",
-    "Edizione non supportata: serve l'ISO PAL Europa di Gears of War 2.",
+    "Edizione non supportata: serve l'ISO {edition} di {game}.",
     "Spazio su disco insufficiente per estrarre l'ISO.",
     "Estrazione non riuscita: ",
     "Estrazione annullata.",
-    "Edizione non supportata: i file estratti non corrispondono all'ISO PAL Europa.",
+    "Edizione non supportata: i file estratti non corrispondono all'ISO {edition}.",
     "I dati del gioco sono già pronti. Estrarre l'ISO sopra quelli esistenti?",
     "Mostra console dei log", "Vale dal prossimo avvio.", "Console dei log",
     "Scarica NVIDIA DLSS", "Download in corso...",
     "Le DLL di NVIDIA DLSS vengono scaricate dal GitHub ufficiale di NVIDIA e sono coperte dalla licenza NVIDIA.",
     "DLL scaricate. DLSS è selezionabile.",
+    "Non disponibile per questo gioco",
+    "Non disponibile in {game}: la ricostruzione HDR segue il tonemapping di un altro gioco",
 };
 
 constexpr UiText kEnglish{
@@ -155,13 +162,13 @@ constexpr UiText kEnglish{
     "AMD FSR 3: one generated frame between two real ones, about twice the frames on screen. Frame rate counts the "
     "real frames; with frame generation they stay under half the monitor's refresh rate. Adds about one frame of "
     "latency. Fullscreen plays as borderless. Turning it on applies at next start; turning it off applies immediately.",
-    "Not available: amd_fidelityfx_framegeneration_dx12.dll is missing next to gow2.exe",
+    "Not available: amd_fidelityfx_framegeneration_dx12.dll is missing next to {exe}",
     "Frame generation",
     "Off",
     "NVIDIA DLSS: one generated frame between two real ones. Needs an RTX 40 or later. Adds about one frame of latency. "
     "The preset (A, B, C) is chosen in the NVIDIA App, not in the game. Fullscreen plays as borderless. "
     "Turning it on applies at next start; turning it off applies immediately.",
-    "Not available: gow2_dlss.dll or nvngx_dlssg.dll is missing next to gow2.exe",
+    "Not available: gow2_dlss.dll or nvngx_dlssg.dll is missing next to {exe}",
     "Off because OptiScaler is installed: choose frame generation in the OptiScaler menu.",
     "Aspect ratio",
     "16:9 is the original. 21:9 widens the field of view (scene 1280x550; HUD and menus intact, videos with side "
@@ -207,7 +214,7 @@ constexpr UiText kEnglish{
     "Neural rendering",
     "Install OptiScaler",
     "Replace with %s",
-    "Downloads OptiScaler %s (F5 fork, GPL-3) from GitHub and puts it next to gow2.exe. Neural rendering needs "
+    "Downloads OptiScaler %s (F5 fork, GPL-3) from GitHub and puts it next to {exe}. Neural rendering needs "
     "nvngx_dlssnr.dll, to be obtained separately. The launcher restarts: unsaved changes are lost.",
     " Overwrites the installed OptiScaler.",
     "Open OptiScaler",
@@ -215,27 +222,55 @@ constexpr UiText kEnglish{
     "Installed: restart the game",
     "Installing...",
     "dxgi.dll from another program: OptiScaler is not installed",
-    "Neural rendering needs nvngx_dlssnr.dll next to gow2.exe (nvngx_dlssnr.dll is not provided by the project).",
+    "Neural rendering needs nvngx_dlssnr.dll next to {exe} (nvngx_dlssnr.dll is not provided by the project).",
     "OptiScaler applies neural rendering only with DLSS.",
     "Automatic restart failed: restart manually.",
     "Game data",
     "Game data ready.",
-    "Game data missing: choose your Gears of War 2 ISO (PAL Europe).",
+    "Game data missing: choose your {game} ISO ({edition}).",
     "Choose ISO...",
     "Extracting...",
     "Cancel",
     "The file is not a valid Xbox 360 ISO image.",
     "The ISO does not contain default.xex.",
-    "Unsupported edition: the PAL Europe ISO of Gears of War 2 is required.",
+    "Unsupported edition: the {edition} ISO of {game} is required.",
     "Not enough disk space to extract the ISO.",
     "Extraction failed: ",
     "Extraction cancelled.",
-    "Unsupported edition: the extracted files do not match the PAL Europe ISO.",
+    "Unsupported edition: the extracted files do not match the {edition} ISO.",
     "The game data is already ready. Extract the ISO over the existing data?",
     "Show log console", "Takes effect on next launch.", "Log console",
     "Download NVIDIA DLSS", "Downloading...",
     "The NVIDIA DLSS DLLs are downloaded from NVIDIA's official GitHub and are covered by NVIDIA's license.",
     "DLLs downloaded. DLSS is now selectable.",
+    "Not available for this game",
+    "Not available in {game}: the HDR reconstruction follows another game's tonemapping",
+};
+
+// {game}, {edition} and {exe} of a text, from the profile of the running game.
+std::string ForGame(std::string s, UiLanguage l) {
+  const auto& p = game_profile::Get();
+  const std::string exe = std::string(p.id) + ".exe";
+  const std::pair<std::string_view, std::string_view> subs[] = {
+      {"{game}", p.name}, {"{edition}", l == UiLanguage::kItalian ? p.edition_it : p.edition}, {"{exe}", exe}};
+  for (const auto& [key, value] : subs)
+    for (size_t at = s.find(key); at != std::string::npos; at = s.find(key, at + value.size()))
+      s.replace(at, key.size(), value);
+  return s;
+}
+
+// UiText with the placeholders filled; the filled texts live in `owned` (built once, never copied or moved).
+struct GameText {
+  std::vector<std::string> owned;
+  UiText text;
+  GameText(const UiText& base, UiLanguage l) : text(base) {
+    static_assert(sizeof(UiText) % sizeof(const char*) == 0);
+    auto* field = reinterpret_cast<const char**>(&text);
+    const size_t n = sizeof(UiText) / sizeof(const char*);
+    owned.reserve(n);  // no reallocation: the pointers into `owned` stay valid
+    for (size_t i = 0; i < n; ++i)
+      if (std::strchr(field[i], '{')) field[i] = owned.emplace_back(ForGame(field[i], l)).c_str();
+  }
 };
 
 }  // namespace
@@ -245,7 +280,10 @@ UiLanguage UiLanguageFor(std::string_view game_language, bool windows_italian) {
   return game_language == "it" ? UiLanguage::kItalian : UiLanguage::kEnglish;
 }
 
-const UiText& Text(UiLanguage l) { return l == UiLanguage::kItalian ? kItalian : kEnglish; }
+const UiText& Text(UiLanguage l) {
+  static const GameText it(kItalian, UiLanguage::kItalian), en(kEnglish, UiLanguage::kEnglish);
+  return (l == UiLanguage::kItalian ? it : en).text;
+}
 
 std::string RestartText(const std::vector<RestartField>& fields, UiLanguage l) {
   const UiText& t = Text(l);

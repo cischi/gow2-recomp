@@ -228,3 +228,205 @@ TEST_CASE("blr and bctr remain unconditional returns") {
     CHECK(analyzedSize({0x4E800020, 0x98860001, 0x4E800020}) == 4);  // blr
     CHECK(analyzedSize({0x4E800420, 0x98860001, 0x4E800020}) == 4);  // bctr
 }
+
+// ---- Instructions found in GoW3 (patches/xenonrecomp/0007) ------------------
+// Encodings built from the PowerPC/VMX formats and checked with the
+// disassembler's op_str; the vcmpbfp128. and vsldoi128 words come from GoW3's default.xex.
+
+TEST_CASE("bdzf -> decrement CTR, branch if CTR == 0 and the CR bit is clear") {
+    auto e = emit(0x4042FFF4, 0x82000100);  // bdzf eq (BI = 2 -> cr0.eq)
+    CHECK(e.name == "bdzf");
+    REQUIRE(e.ok);
+    CHECK(contains(e.code, "--ctx.ctr.u64;"));
+    CHECK(contains(e.code, "if (ctx.ctr.u32 == 0 && !ctx.cr0.eq) goto loc_820000F4;"));
+
+    auto g = emit(0x4059FFF4, 0x82000100);  // BI = 25 -> cr6.gt
+    CHECK(g.opStr.rfind("4*cr6+gt,", 0) == 0);
+    REQUIRE(g.ok);
+    CHECK(contains(g.code, "if (ctx.ctr.u32 == 0 && !ctx.cr6.gt) goto loc_820000F4;"));
+}
+
+TEST_CASE("subfze, addme, addc -> carry helpers, record forms compare into cr0") {
+    auto a = emit(0x7C640190);
+    CHECK(a.name == "subfze");
+    CHECK(a.opStr == "r3,r4");
+    REQUIRE(a.ok);
+    CHECK(contains(a.code, "ctx.r3.u64 = ppc_subfze(ctx.r4.u64, ctx.xer);"));
+
+    auto ar = emit(0x7C640191);
+    CHECK(ar.name == "subfze.");
+    REQUIRE(ar.ok);
+    CHECK(contains(ar.code, "ctx.cr0.compare<int32_t>(ctx.r3.s32, 0, ctx.xer);"));
+
+    auto m = emit(0x7C6401D4);
+    CHECK(m.name == "addme");
+    CHECK(m.opStr == "r3,r4");
+    REQUIRE(m.ok);
+    CHECK(contains(m.code, "ctx.r3.u64 = ppc_addme(ctx.r4.u64, ctx.xer);"));
+
+    auto c = emit(0x7C642814);
+    CHECK(c.name == "addc");
+    CHECK(c.opStr == "r3,r4,r5");
+    REQUIRE(c.ok);
+    CHECK(contains(c.code, "ctx.r3.u64 = ppc_addc(ctx.r4.u64, ctx.r5.u64, ctx.xer);"));
+}
+
+TEST_CASE("mulhdu -> rT = ppc_mulhdu(rA, rB)") {
+    auto e = emit(0x7C642812);
+    CHECK(e.name == "mulhdu");
+    CHECK(e.opStr == "r3,r4,r5");
+    REQUIRE(e.ok);
+    CHECK(contains(e.code, "ctx.r3.u64 = ppc_mulhdu(ctx.r4.u64, ctx.r5.u64);"));
+}
+
+namespace {
+struct UpdateCase {
+    uint32_t word;
+    const char* name;
+    const char* opStr;
+    std::vector<std::string> code;  // in this order: rA is written last
+};
+
+void checkUpdateCases(std::initializer_list<UpdateCase> cases) {
+    for (const auto& c : cases) {
+        INFO(c.name);
+        auto e = emit(c.word);
+        CHECK(e.name == c.name);
+        CHECK(e.opStr == c.opStr);
+        REQUIRE(e.ok);
+        size_t at = 0;
+        for (const auto& line : c.code) {
+            INFO(line);
+            at = e.code.find(line, at);
+            CHECK(at != std::string::npos);
+        }
+    }
+}
+}  // namespace
+
+TEST_CASE("D-form update loads and stores write the EA back to rA") {
+    checkUpdateCases({
+        {0xA464FFF8, "lhzu", "r3,-8(r4)", {"ea = -8 + ctx.r4.u32;", "ctx.r3.u64 = PPC_LOAD_U16(ea);", "ctx.r4.u32 = ea;"}},
+        {0xAC64FFFE, "lhau", "r3,-2(r4)", {"ea = -2 + ctx.r4.u32;", "ctx.r3.s64 = int16_t(PPC_LOAD_U16(ea));", "ctx.r4.u32 = ea;"}},
+        {0xB461FFFE, "sthu", "r3,-2(r1)", {"ea = -2 + ctx.r1.u32;", "PPC_STORE_U16(ea, ctx.r3.u16);", "ctx.r1.u32 = ea;"}},
+        {0xC4230004, "lfsu", "f1,4(r3)", {"ea = 4 + ctx.r3.u32;", ".u32 = PPC_LOAD_U32(ea);", "ctx.f1.f64 = double(", "ctx.r3.u32 = ea;"}},
+        {0xCC230008, "lfdu", "f1,8(r3)", {"ea = 8 + ctx.r3.u32;", "ctx.f1.u64 = PPC_LOAD_U64(ea);", "ctx.r3.u32 = ea;"}},
+        {0xD4230004, "stfsu", "f1,4(r3)", {"ea = 4 + ctx.r3.u32;", ".f32 = float(ctx.f1.f64);", "PPC_STORE_U32(ea, ", "ctx.r3.u32 = ea;"}},
+        {0xDC23FFF8, "stfdu", "f1,-8(r3)", {"ea = -8 + ctx.r3.u32;", "PPC_STORE_U64(ea, ctx.f1.u64);", "ctx.r3.u32 = ea;"}},
+    });
+}
+
+TEST_CASE("X-form update loads and stores write rA + rB back to rA") {
+    checkUpdateCases({
+        {0x7C642A6E, "lhzux", "r3,r4,r5", {"ea = ctx.r4.u32 + ctx.r5.u32;", "ctx.r3.u64 = PPC_LOAD_U16(ea);", "ctx.r4.u32 = ea;"}},
+        {0x7C6428EE, "lbzux", "r3,r4,r5", {"ea = ctx.r4.u32 + ctx.r5.u32;", "ctx.r3.u64 = PPC_LOAD_U8(ea);", "ctx.r4.u32 = ea;"}},
+        {0x7C64286E, "lwzux", "r3,r4,r5", {"ea = ctx.r4.u32 + ctx.r5.u32;", "ctx.r3.u64 = PPC_LOAD_U32(ea);", "ctx.r4.u32 = ea;"}},
+        {0x7C6429EE, "stbux", "r3,r4,r5", {"ea = ctx.r4.u32 + ctx.r5.u32;", "PPC_STORE_U8(ea, ctx.r3.u8);", "ctx.r4.u32 = ea;"}},
+        {0x7C642B6E, "sthux", "r3,r4,r5", {"ea = ctx.r4.u32 + ctx.r5.u32;", "PPC_STORE_U16(ea, ctx.r3.u16);", "ctx.r4.u32 = ea;"}},
+        {0x7C242C6E, "lfsux", "f1,r4,r5", {"ea = ctx.r4.u32 + ctx.r5.u32;", ".u32 = PPC_LOAD_U32(ea);", "ctx.f1.f64 = double(", "ctx.r4.u32 = ea;"}},
+    });
+}
+
+TEST_CASE("lvehx -> the aligned quadword, like lvewx") {
+    auto e = emit(0x7C24284E);
+    CHECK(e.name == "lvehx");
+    CHECK(e.opStr == "v1,r4,r5");
+    REQUIRE(e.ok);
+    CHECK(contains(e.code, "PPC_HOST(((ctx.r4.u32 + ctx.r5.u32) & ~0xF))"));
+}
+
+TEST_CASE("halfword vector shifts and vaddsws -> helpers") {
+    auto sra = emit(0x10221B44);
+    CHECK(sra.name == "vsrah");
+    CHECK(sra.opStr == "v1,v2,v3");
+    REQUIRE(sra.ok);
+    CHECK(contains(sra.code, "ppc_vsrah(ctx.v1, ctx.v2, ctx.v3);"));
+
+    auto sl = emit(0x10221944);
+    CHECK(sl.name == "vslh");
+    REQUIRE(sl.ok);
+    CHECK(contains(sl.code, "ppc_vslh(ctx.v1, ctx.v2, ctx.v3);"));
+
+    auto sr = emit(0x10221A44);
+    CHECK(sr.name == "vsrh");
+    REQUIRE(sr.ok);
+    CHECK(contains(sr.code, "ppc_vsrh(ctx.v1, ctx.v2, ctx.v3);"));
+
+    auto add = emit(0x10221B80);
+    CHECK(add.name == "vaddsws");
+    REQUIRE(add.ok);
+    CHECK(contains(add.code, "ppc_vaddsws(ctx.v1, ctx.v2, ctx.v3);"));
+}
+
+TEST_CASE("vsubshs, vcmpgtsh, vcmpequh -> lane-wise SSE on halfwords, vA op vB") {
+    auto s = emit(0x10221F40);
+    CHECK(s.name == "vsubshs");
+    REQUIRE(s.ok);
+    CHECK(contains(s.code, "simde_mm_subs_epi16(simde_mm_load_si128((simde__m128i*)ctx.v2.s16), simde_mm_load_si128((simde__m128i*)ctx.v3.s16))"));
+
+    auto gt = emit(0x10221B46);
+    CHECK(gt.name == "vcmpgtsh");
+    REQUIRE(gt.ok);
+    CHECK(contains(gt.code, "simde_mm_cmpgt_epi16(simde_mm_load_si128((simde__m128i*)ctx.v2.s16), simde_mm_load_si128((simde__m128i*)ctx.v3.s16))"));
+
+    auto eq = emit(0x10221846);
+    CHECK(eq.name == "vcmpequh");
+    REQUIRE(eq.ok);
+    CHECK(contains(eq.code, "simde_mm_cmpeq_epi16(simde_mm_load_si128((simde__m128i*)ctx.v2.u16), simde_mm_load_si128((simde__m128i*)ctx.v3.u16))"));
+    CHECK_FALSE(contains(eq.code, "cr6"));
+
+    auto eqr = emit(0x10221C46);
+    CHECK(eqr.name == "vcmpequh.");
+    REQUIRE(eqr.ok);
+    CHECK(contains(eqr.code, "ctx.cr6.setFromMask("));
+    CHECK(contains(eqr.code, "0xFFFF"));
+
+    auto gtr = emit(0x10221F46);
+    CHECK(gtr.name == "vcmpgtsh.");
+    REQUIRE(gtr.ok);
+    CHECK(contains(gtr.code, "ctx.cr6.setFromMask("));
+    CHECK(contains(gtr.code, "0xFFFF"));
+}
+
+TEST_CASE("vspltish -> sign-extended 5-bit immediate in every halfword") {
+    auto m = emit(0x103F034C);
+    CHECK(m.name == "vspltish");
+    CHECK(m.opStr == "v1,-1");
+    REQUIRE(m.ok);
+    CHECK(contains(m.code, "simde_mm_set1_epi16(short(-1))"));
+
+    auto p = emit(0x102F034C);
+    CHECK(p.opStr == "v1,15");
+    REQUIRE(p.ok);
+    CHECK(contains(p.code, "simde_mm_set1_epi16(short(15))"));
+}
+
+TEST_CASE("vcmpbfp128 -> ppc_vcmpbfp; the record form sets cr6 = 0 0 all-in-bounds 0") {
+    auto r = emit(0x19AF71E5);  // GoW3 0x82DC3E84
+    CHECK(r.name == "vcmpbfp128.");
+    REQUIRE(r.ok);
+    CHECK_FALSE(contains(r.code, "debugtrap"));
+    CHECK(contains(r.code, "ctx.cr6.eq = ppc_vcmpbfp("));
+    CHECK(contains(r.code, "ctx.cr6.lt = 0;"));
+    CHECK(contains(r.code, "ctx.cr6.gt = 0;"));
+    CHECK(contains(r.code, "ctx.cr6.so = 0;"));
+
+    auto n = emit(0x19AF71A5);
+    CHECK(n.name == "vcmpbfp128");
+    REQUIRE(n.ok);
+    CHECK_FALSE(contains(n.code, "debugtrap"));
+    CHECK_FALSE(contains(n.code, "cr6"));
+    CHECK(contains(n.code, "ppc_vcmpbfp("));
+
+    auto v = emit(0x10221BC6);
+    CHECK(v.name == "vcmpbfp");
+    CHECK(v.opStr == "v1,v2,v3");
+    REQUIRE(v.ok);
+    CHECK(contains(v.code, "ppc_vcmpbfp(ctx.v1, ctx.v2, ctx.v3);"));
+}
+
+TEST_CASE("VMX128 word once taken for the PPC405 mulchw. decodes as vsldoi128") {
+    auto e = emit(0x10C98951);  // GoW3 0x82FDA6A0 (VX128_5: opcode 4, bit 0x10)
+    CHECK(e.name == "vsldoi128");
+    REQUIRE(e.ok);
+}

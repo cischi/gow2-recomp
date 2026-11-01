@@ -1,5 +1,6 @@
 // gow2.exe [--data <dir>] [--user-data <dir>] [--trace] [--run-seconds N] [--language <code>]
 //          [--gpu fake|d3d12] [--screenshot S:file] [--gpu-cvar name=value]... [--gpu-probe]
+//          [--shader-capture]
 //          [--audio xaudio2|null] [--mute] [--audio-capture <file.wav>] [--xma-decoder new|old]
 //          [--input-script "<s>:<BUTTON>[+<ms>],..."]
 //          [--config <file>] [--window windowed|borderless|fullscreen] [--resolution WxH]
@@ -16,8 +17,8 @@
 // starts the game, Quit closes with 0. If the launcher cannot start (no D3D11) the game
 // runs with the file as it is.
 //
-// Loads <dir>/default.xex (default: ./game_data in the current directory, otherwise
-// game_data next to the executable) into guest memory and enters the recompiled entry
+// Loads <dir>/default.xex (default: the profile's data folder, `game_data` for GoW2 and
+// `game_data_gow3` for GoW3, in the current directory, otherwise next to the executable) into guest memory and enters the recompiled entry
 // point. The kernel and XAM imports implemented in runtime/kernel/ (KERNEL_EXPORT) run
 // in HLE; the others are stubs that write `[kernel] UNIMPLEMENTED Name(r3..r10)` to the
 // log (gow2.log in the current directory) on the first call and return 0. With --trace
@@ -34,11 +35,13 @@
 //
 // Guest file system (kernel/io/vfs.h): game:, d: and \Device\Cdrom0 are mounted read-only
 // on <data>; cache: read/write on <user_data>/cache (created if missing). <user_data> is
-// --user-data if given, otherwise <parent of data>/user_data: with the default
-// ./game_data the folder is ./user_data in the repository root (git-ignored); with --data
+// --user-data if given, otherwise <parent of data>/<profile user_data folder> (`user_data` for
+// GoW2, `user_data_gow3` for GoW3): with the default data folder it is in the repository root (git-ignored); with --data
 // elsewhere the user data sits next to the game data. XAM content (saves...) lives in
-// user_data/content: every package opened with XamContentCreateEx is a mounted
+// <user_data>/content: every package opened with XamContentCreateEx is a mounted
 // subfolder (read and write) with the root name chosen by the game (kernel/xam.h).
+// <user_data>/shaders: Xenia's persistent shader/pipeline storage of the d3d12 backend, files named
+// by the XEX title id (gpu/d3d12_backend.h, D3D12Options::shader_cache_root).
 //
 // --language <code>: language returned by XGetLanguage (default en, or [game] language of
 // the file): en ja de fr es it ko zh (= zh-tw, Traditional Chinese) zh-cn pt pl ru,
@@ -54,11 +57,15 @@
 // --screenshot S:file (repeatable): the first frame presented S seconds (0..86400) after
 // startup goes to `file` (24-bit BMP); multiple requests are served in time order, one
 // per frame; d3d12 only.
+// --shader-capture (debug, not in the launcher or the F1 overlay): F11 starts/stops a recording in
+// <exe folder>/shader_captures/<game id>/<date_time>/ of the shaders used (shaders/) and of 5 PNG shots per
+// second, each with the list of its frame's draws (frames/); d3d12 only (gpu/shader_capture.h).
 // --gpu-cvar name=value (repeatable): cvar of Xenia's GPU code (gow2::xenia::SetCvar),
 // applied in order after gow2's defaults render_target_path_d3d12=rtv,
 // draw_resolution_scaled_texture_offsets=false (tfetch offsets in guest texels for UE3's
 // DOF downsample at internal resolution > 1), occlusion_query=strict (true occlusion
-// query counts), d3d12_submit_every_draws=100, gow2_clear_msaa_remap=true,
+// query counts), d3d12_submit_every_draws=100, d3d12_submit_every_draws_scaled (true only
+// for the games whose profile asks for it), gow2_clear_msaa_remap=true,
 // gow2_resolve_fill_depth=false and draw_resolution_scale_threshold=640.
 // Unknown name or invalid value: exit 2.
 // --config <file>: TOML settings file (runtime/settings.h; default gow2.toml next to
@@ -135,6 +142,7 @@
 #include "crash_map.h"
 #include "frame_pacing.h"
 #include "game_data.h"
+#include "game_profile.h"
 #include "gpu/d3d12_backend.h"
 #include "gpu/d3d12_probe.h"
 #include "gpu/gpu_system.h"
@@ -262,9 +270,11 @@ void StopVibrationBeforeExit() {
 
 // OptiScaler installation from the overlay: _Exit must not cut it off mid-copy (swapped dxgi.dll,
 // half-copied OptiScaler folder). The download is cancelled; a copy in progress finishes (a few local files).
+// Also the shader capture's queued shots (--shader-capture), written before exiting.
 void StopInstallBeforeExit() {
   optiscaler::CancelInstall();
   optiscaler::WaitInstallCopy();
+  gpu::StopShaderCaptureBeforeExit();
 }
 
 // --run-seconds: host thread that after `seconds` writes the summary and ends the
@@ -299,6 +309,7 @@ void OnGpuFatalError() {
 struct GpuOptions {
   gpu::BackendKind kind = gpu::BackendKind::kD3D12;
   std::vector<gpu::ScreenshotRequest> screenshots;
+  bool shader_capture = false;  // --shader-capture
   std::chrono::steady_clock::time_point start;  // startup: base of --screenshot and --input-script
   std::optional<std::vector<hid::ScriptEvent>> input_script;
   plat::WindowOptions window;
@@ -332,17 +343,18 @@ struct SdlStart {
 int Run(const fs::path& data_dir, const fs::path& user_data_opt, uint32_t run_seconds, const GpuOptions& gpu_options,
         const apu::AudioOptions& audio_options, std::vector<std::pair<std::string, std::string>> file_replacements,
         SdlStart sdl) {
-  LogInit("gow2.log");
+  const game_profile::Profile& profile = game_profile::Get();
+  LogInit(game_profile::LogFileName());
 
   const fs::path xex = data_dir / "default.xex";
   std::error_code ec;
   if (!fs::is_regular_file(xex, ec)) return Fail(2, "default.xex not found in " + Show(data_dir));
-  switch (game_data::CheckXex(data_dir)) {
+  switch (game_data::CheckXex(data_dir, profile.image_sha256)) {
     case game_data::XexCheck::kOk:
       break;
     case game_data::XexCheck::kMismatch:
-      return Fail(2, "default.xex does not match the supported edition (Gears of War 2, PAL Europe). Expected SHA-256 " +
-                         std::string(game_data::kExpectedXexSha256) + ".");
+      return Fail(2, "default.xex does not match the supported edition (" + std::string(profile.name) + ", " +
+                         std::string(profile.edition) + "). Expected image SHA-256 " + std::string(profile.image_sha256) + ".");
     default:
       return Fail(2, "cannot read default.xex in " + Show(data_dir));
   }
@@ -381,12 +393,13 @@ int Run(const fs::path& data_dir, const fs::path& user_data_opt, uint32_t run_se
   const fs::path user_data =
       !user_data_opt.empty()
           ? fs::absolute(user_data_opt, fs_ec).lexically_normal()
-          : (data_abs.has_filename() ? data_abs : data_abs.parent_path()).parent_path() / "user_data";
+          : (data_abs.has_filename() ? data_abs : data_abs.parent_path()).parent_path() / profile.user_data_dir;
   // Engine configuration: modified Coalesced files in <user_data>/engine only with a non-default [engine].
   const settings::Engine engine = gpu_options.settings ? gpu_options.settings->engine : settings::Engine{};
   engine_config::Prepared engine_files;
-  if (engine != settings::Engine{}) {
-    engine_files = engine_config::Prepare(data_abs / "GearGame" / "CookedXenon", user_data / "engine", engine);
+  const bool engine_available = launcher::UnavailableOptions().count("engine") == 0;
+  if (engine != settings::Engine{} && engine_available) {
+    engine_files = engine_config::Prepare(data_abs / fs::path(profile.cooked_dir).make_preferred(), user_data / "engine", engine);
     for (const auto& line : engine_files.log) LogLine(line);
   }
   settings::FrameRate frame_rate = gpu_options.frame_rate;
@@ -404,7 +417,10 @@ int Run(const fs::path& data_dir, const fs::path& user_data_opt, uint32_t run_se
     if (gpu_options.aspect == settings::Aspect::k16x10) patches.insert(game_patches::kAspect16x10Key);
     // Motion blur is disabled via the uber post constants (d3d12_backend.cpp), not with the hook: the hook makes
     // the game pick another uber post variant and the upscaler no longer finds the capture and velocity buffer.
-    if (patches.erase("disable_motion_blur"))
+    // Without the patch in this game the key stays: Apply logs "not available". A game without the uber post
+    // capture in its profile keeps the key: Apply turns on the table's hooks.
+    if (profile.post.motion_ps && game_patches::Available(game_patches::kDisableMotionBlur) &&
+        patches.erase("disable_motion_blur"))
       LogLine("[patch] disable_motion_blur: turned on (uber post constants)");
     for (const auto& line : game_patches::Apply(mem, patches)) LogLine(line);
   }
@@ -439,6 +455,8 @@ int Run(const fs::path& data_dir, const fs::path& user_data_opt, uint32_t run_se
     LogLine("[optiscaler] frame generation turned off: OptiScaler installed");
   if (engine == settings::Engine{}) {
     LogLine("[engine] original configuration");
+  } else if (!engine_available) {
+    LogLine("[engine] not available for this game");
   } else if (!engine_files.replacements.empty() && !game_patches::Enabled(game_patches::kCoalescedNoHashCheck)) {
     LogLine("[engine] Coalesced check patch not applied: original configuration");
     engine_files.replacements.clear();
@@ -480,6 +498,8 @@ int Run(const fs::path& data_dir, const fs::path& user_data_opt, uint32_t run_se
   const uint32_t hmodule = kernel::module::InitExecutable(
       {image->base, image->size, image->entry, image->header, "default.xex"});
   if (!hmodule) return Fail(1, "cannot prepare the LDR of the executable module");
+  kernel::module::SetProcedureInstaller(
+      [](kernel::module::HostFunction* f) { return InstallExtraFunction(kernel::g_base, f); });
   // The KeTimeStampBundle ticker (a host thread writing into the arena) must be
   // stopped on every error exit before the heaps and the static arena: declared
   // after memory_shutdown, it is destroyed first.
@@ -542,11 +562,12 @@ int Run(const fs::path& data_dir, const fs::path& user_data_opt, uint32_t run_se
       gpu_backend = gpu_fake::CreateBackend();
       break;
     case gpu::BackendKind::kD3D12: {
-      game_window.window = plat::CreateGameWindow("Gears of War 2 (gow2)", gpu_options.window, true, &OnWindowClosed);
+      game_window.window = plat::CreateGameWindow(std::string(profile.name) + " (" + std::string(profile.id) + ")", gpu_options.window, true, &OnWindowClosed);
       if (!game_window.window) return Fail(1, "cannot create the game window");
       gpu::D3D12Options options;
       options.window = game_window.window;
       options.screenshots = gpu_options.screenshots;
+      options.shader_capture = gpu_options.shader_capture;
       options.start = gpu_options.start;
       options.stretch = gpu_options.stretch;
       options.vsync = gpu_options.vsync;
@@ -568,6 +589,8 @@ int Run(const fs::path& data_dir, const fs::path& user_data_opt, uint32_t run_se
       options.hdr_force = gpu_options.hdr_force;
       options.hdr_peak_nits = gpu_options.hdr_peak_nits;
       options.hdr_paper_white_nits = gpu_options.hdr_paper_white_nits;
+      options.shader_cache_root = user_data;
+      options.title_id = kernel::module::ExecutableTitleId();
       gpu_backend = gpu::CreateD3D12Backend(mem, options);
       if (!gpu_backend) {
         LogLine("gow2: cannot create the D3D12 device (see the [gpu] and [xenia] lines above); "
@@ -666,7 +689,7 @@ int wmain(int argc, wchar_t** argv) {
   // Before any window: sizes in physical pixels, no blurry scaling.
   plat::EnablePerMonitorDpiAwareness();
   // gow2.toml next to the exe or --config: read below, after the launcher if any.
-  fs::path config = plat::ExecutablePath().parent_path() / "gow2.toml";
+  fs::path config = plat::ExecutablePath().parent_path() / game_profile::SettingsFileName();
   bool explicit_config = false;
   // GOW2_CONFIG like --config (which overrides it): the tests point it at an empty file.
   {
@@ -694,6 +717,11 @@ int wmain(int argc, wchar_t** argv) {
   // Launcher before SDL and the startup instant: the time spent in the settings does
   // not shift --screenshot and --input-script. If it cannot start the game runs with the file as it is.
   if (want_launcher && !help) {
+    // A dxgi.dll proxy next to the exe (OptiScaler) is for the game, not the launcher: dxgi and d3d11 are
+    // delay-loaded, so the launcher takes the system ones; the game then restarts in a fresh process.
+    const fs::path proxy = launcher::ExeDir() / "dxgi.dll";
+    std::error_code ec;
+    if (fs::exists(proxy, ec)) SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32);
     std::string why;
     switch (launcher::Run(config, {}, &why)) {
       case launcher::Result::kQuit:
@@ -704,10 +732,30 @@ int wmain(int argc, wchar_t** argv) {
       case launcher::Result::kPlay:
         break;
     }
+    // Also a proxy installed from the launcher. --config skips the launcher (Play has saved the file).
+    if (fs::exists(proxy, ec) && !optiscaler::Loaded(launcher::ExeDir())) {
+      // shortcut: plain quoting, breaks on an argument ending in a backslash; upgrade if such paths appear.
+      std::wstring cmd = L"\"" + plat::ExecutablePath().wstring() + L"\"";
+      for (int i = 1; i < argc; ++i)
+        if (std::wstring_view(argv[i]) != L"--launcher") cmd += L" \"" + std::wstring(argv[i]) + L"\"";
+      cmd += L" --config \"" + config.wstring() + L"\"";
+      STARTUPINFOW si{sizeof si};
+      PROCESS_INFORMATION pi{};
+      if (!CreateProcessW(plat::ExecutablePath().c_str(), cmd.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr,
+                          &si, &pi)) {
+        ErrPuts("restarting the game failed (error " + std::to_string(GetLastError()) + ")\n");
+        return 1;
+      }
+      CloseHandle(pi.hThread);
+      CloseHandle(pi.hProcess);
+      return 0;
+    }
   }
-  // Default: ./game_data (current directory); if it does not exist, game_data next to the executable.
-  fs::path data_dir = game_data::ResolveDataDir(plat::ExecutablePath().parent_path());
-  fs::path user_data_dir;  // empty: <parent of data>/user_data
+  // As the static import did before the delay load: a dxgi.dll proxy loads at startup, before the GPU.
+  LoadLibraryW(L"dxgi.dll");
+  // Default: the profile's data folder (game_data / game_data_gow3) in the current directory; if it does not exist, next to the executable.
+  fs::path data_dir = game_data::ResolveDataDir(plat::ExecutablePath().parent_path(), game_profile::Get().data_dir);
+  fs::path user_data_dir;  // empty: <parent of data>/<profile user_data folder>
   uint32_t run_seconds = 0;
   // SDL_Init (HIDAPI and pad enumeration) takes a variable amount of time: done
   // here, synchronously and before taking the startup instant, it does not shift the
@@ -748,6 +796,12 @@ int wmain(int argc, wchar_t** argv) {
   // fps; at 2x/3x the GPU is saturated and splitting would bring the blue armor back.
   if (!gpu::SetXeniaCvar("d3d12_submit_every_draws", "100")) {
     ErrPuts("cvar d3d12_submit_every_draws missing: incomplete build\n");
+    return 1;
+  }
+  // GoW3 at 2x/3x: the GPU is idle ~30% of the frame waiting for the CPU at the query wait; splitting there too
+  // overlaps them (3x gameplay: 79 -> 117 fps) with the counts unchanged (per-frame ZPD statistics).
+  if (!gpu::SetXeniaCvar("d3d12_submit_every_draws_scaled", game_profile::Get().submit_split_scaled ? "true" : "false")) {
+    ErrPuts("cvar d3d12_submit_every_draws_scaled missing: incomplete build\n");
     return 1;
   }
   // The XDK Clear draws at 4x on the depth owned by a 1x target: remapped to the owner's MSAA,
@@ -1034,6 +1088,8 @@ int wmain(int argc, wchar_t** argv) {
         return 2;
       }
       gpu_options.screenshots.push_back(*shot);
+    } else if (arg == L"--shader-capture") {
+      gpu_options.shader_capture = true;
     } else if (arg == L"--input-script" && i + 1 < argc) {
       const std::string script = Narrow(argv[++i]);
       gpu_options.input_script = hid::ParseInputScript(script);
@@ -1083,7 +1139,7 @@ int wmain(int argc, wchar_t** argv) {
     } else {
       ErrPuts("usage: gow2 [--data <folder with default.xex>] [--user-data <folder>] [--trace] [--run-seconds N] "
                  "[--language <code>] [--gpu fake|d3d12] [--screenshot S:file] [--gpu-cvar name=value]... "
-                 "[--gpu-probe] [--audio xaudio2|null] [--mute] [--audio-capture <file.wav>] [--xma-decoder new|old] "
+                 "[--gpu-probe] [--shader-capture] [--audio xaudio2|null] [--mute] [--audio-capture <file.wav>] [--xma-decoder new|old] "
                  "[--input-script \"<s>:<BUTTON>[+<ms>],...\"] [--config <file>] "
                  "[--window windowed|borderless|fullscreen] [--resolution WxH] [--vsync on|off] "
                  "[--frame-rate 30|60|120|144|monitor|unlimited] [--vrr auto|on|off] "
@@ -1153,6 +1209,10 @@ int wmain(int argc, wchar_t** argv) {
   }
   if (!gpu_options.screenshots.empty() && gpu_options.kind != gpu::BackendKind::kD3D12) {
     ErrPuts("--screenshot invalid with --gpu fake (no presenter)\n");
+    return 2;
+  }
+  if (gpu_options.shader_capture && gpu_options.kind != gpu::BackendKind::kD3D12) {
+    ErrPuts("--shader-capture invalid with --gpu fake (no presenter)\n");
     return 2;
   }
   return Run(data_dir, user_data_dir, run_seconds, gpu_options, audio_options, std::move(skip_movies),

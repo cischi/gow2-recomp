@@ -107,24 +107,31 @@ void UpscalePasses::MotionVectors(ID3D12GraphicsCommandList* cmd, ID3D12Resource
   srv.Texture2D.MipLevels = 1;
   srv.Format = DXGI_FORMAT_R32_FLOAT;
   device_->CreateShaderResourceView(depth, &srv, Cpu(slot, 0));
-  srv.Format = DXGI_FORMAT_R16G16_UNORM;  // tf3 k_16_16 (risorsa R16G16_TYPELESS in Xenia)
+  srv.Format = DXGI_FORMAT_R16G16_UNORM;  // GoW2 tf3 k_16_16 (R16G16_TYPELESS resource in Xenia)
+  if (k.velocity_mapping) {  // guest components picked through the binding's swizzle
+    srv.Format = ShaderViewFormat(vel.Format);
+    srv.Shader4ComponentMapping = k.velocity_mapping;
+  }
   device_->CreateShaderResourceView(velocity, &srv, Cpu(slot, 1));
   D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
   uav.Format = DXGI_FORMAT_R16G16_FLOAT;
   uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
   device_->CreateUnorderedAccessView(mv, nullptr, &uav, Cpu(slot, 2));
 
-  uint32_t constants[29];
-  std::memcpy(constants, &k, sizeof(k));
+  uint32_t constants[30];
+  std::memcpy(constants, &k, 24 * sizeof(float));  // c2, c13..c17
   constants[24] = uint32_t(out.Width);
   constants[25] = out.Height;
   constants[26] = uint32_t(vel.Width);
   constants[27] = vel.Height;
   constants[28] = CameraAtRest(k) ? 1u : 0u;
+  // An 8-bit UNORM buffer cannot encode 0.5: a still object reads +-1/255 (~0.3 px of fake motion).
+  const float step = srv.Format == DXGI_FORMAT_R8G8B8A8_UNORM ? 1.5f / 255.0f : 0.0f;
+  std::memcpy(&constants[29], &step, 4);
   ID3D12DescriptorHeap* heaps[] = {heap_.Get()};
   cmd->SetDescriptorHeaps(1, heaps);
   cmd->SetComputeRootSignature(mv_root_.Get());
-  cmd->SetComputeRoot32BitConstants(0, 29, constants, 0);
+  cmd->SetComputeRoot32BitConstants(0, 30, constants, 0);
   cmd->SetComputeRootDescriptorTable(1, Gpu(slot, 0));
   cmd->SetPipelineState(mv_pso_.Get());
   cmd->Dispatch((uint32_t(out.Width) + 7) / 8, (out.Height + 7) / 8, 1);

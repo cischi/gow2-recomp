@@ -40,11 +40,12 @@ def _section(name, vsize, va, flags):
     return struct.pack("<8sIIIIIIHHI", name, vsize, va, vsize, va, 0, 0, 0, 0, flags)
 
 
-def _image(switch_pdata_size=0):
+def _image(switch_pdata_size=0, slwi_first=False):
     """Minimal PE image: .rdata and .pdata (data), .text (code).
 
     With switch_pdata_size, .pdata also has an entry for the inline switch's
-    function (+0x78) that is switch_pdata_size bytes long.
+    function (+0x78) that is switch_pdata_size bytes long. With slwi_first the
+    inline switch is lis/slwi/addi, the order of the GoW3 compiler.
 
     .text at TEXT:
       +0x00 table of 3 pointers to the getters (+0x0C, +0x1C, +0x2C)
@@ -76,7 +77,10 @@ def _image(switch_pdata_size=0):
     code += [ADDI, _b(TEXT + 0x40, TEXT + 0x4C), ADDI, BLR, ADDI, ADDI, BLR]
     code += [TEXT + 0x60, BLR, ADDI, BLR]
     code += [ADDI, BLR, ADDI, BLR]
-    code += [0x3D808200, 0x398C0000 | ((TEXT + 0x90) & 0xFFFF), SLWI_R0_R3, LWZX, MTCTR, BCTR,
+    load = [0x398C0000 | ((TEXT + 0x90) & 0xFFFF), SLWI_R0_R3]
+    if slwi_first:
+        load.reverse()
+    code += [0x3D808200, *load, LWZX, MTCTR, BCTR,
              TEXT + 0x98, TEXT + 0xA0, ADDI, BLR, ADDI, BLR]
     code += [BLR]
     struct.pack_into(">%dI" % len(code), img, 0x1000, *code)
@@ -120,6 +124,12 @@ def test_inline_switch_without_bound_check():
     assert [(s.base, s.r, s.labels, s.function, s.end) for s in inline] == [
         (TEXT + 0x78, 3, [TEXT + 0x98, TEXT + 0xA0], TEXT + 0x78, TEXT + 0xA8)]
     assert not {TEXT + 0x98, TEXT + 0xA0} & {c.address for c in found}
+
+
+def test_inline_switch_with_slwi_before_addi():
+    inline, _ = _load().analyze(_image(slwi_first=True), BASE, KNOWN, SWITCHES)
+    assert [(s.base, s.r, s.labels, s.function, s.end) for s in inline] == [
+        (TEXT + 0x78, 3, [TEXT + 0x98, TEXT + 0xA0], TEXT + 0x78, TEXT + 0xA8)]
 
 
 def test_switch_function_covered_by_pdata_needs_no_entry():

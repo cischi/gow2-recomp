@@ -13,10 +13,14 @@ IsoCheck CheckIso(const std::filesystem::path& iso, uint64_t free_bytes, std::st
   if (!payload) return IsoCheck::kNotAnIso;
   const auto xex = ReadIsoFile(iso, "default.xex");
   if (!xex) return IsoCheck::kNoXex;
-  if (game_data::Sha256Bytes(*xex) != expected) return IsoCheck::kWrongEdition;
+  if (game_data::XexImageSha256(*xex) != expected) return IsoCheck::kWrongEdition;
   constexpr uint64_t kSlack = 256ull << 20;
   if (free_bytes < *payload + kSlack) return IsoCheck::kNoSpace;
   return IsoCheck::kOk;
+}
+
+bool DataReady(const std::filesystem::path& dir, std::string_view expected) {
+  return game_data::ExtractionComplete(dir) && game_data::CheckXex(dir, expected) == game_data::XexCheck::kOk;
 }
 
 uint64_t FreeSpaceFor(const std::filesystem::path& dir) {

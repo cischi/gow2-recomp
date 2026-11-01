@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Pipeline orchestrator: extract -> configure -> recompile -> gow2.
 
-    python tools/gow2.py build --iso <DVD.iso> [--force]
+    python tools/gow2.py build [--game gow2|gow3] --iso <DVD.iso> [--force]
 
 MSVC environment: clang-cl needs INCLUDE/LIB. If they are already set
 ("x64 Native Tools" prompt) the current environment is used; otherwise
@@ -25,6 +25,11 @@ BUILD_DIR = ROOT / "build" / PRESET
 GAME_DATA = ROOT / "game_data"
 EXTRACT_EXE = BUILD_DIR / "tools" / "extract" / "extract.exe"
 GOW2_EXE = BUILD_DIR / "runtime" / "gow2.exe"
+# Per game: data folder, recompile target (cmake/Recompile.cmake), exe target (runtime/CMakeLists.txt).
+GAMES = {
+    "gow2": (GAME_DATA, "recompile", "gow2"),
+    "gow3": (ROOT / "game_data_gow3", "recompile_gow3", "gow3"),
+}
 EXTRACT_MARKER = ".extract_ok"  # written by RunExtract as its last action
 RUN_HINT = (f'Run (from the repository root): "{GOW2_EXE}" [--data <folder with default.xex>] [--user-data <folder>] [--trace] '
             "[--run-seconds N] [--language <code>] [--gpu fake|d3d12] [--screenshot S:file] "
@@ -113,6 +118,8 @@ def cmd_build(args: argparse.Namespace) -> int:
         print(f"error: {e}", file=sys.stderr)
         return 1
 
+    game_data, recompile_target, exe_target = GAMES[args.game]
+    exe = BUILD_DIR / "runtime" / f"{exe_target}.exe"
     cmake = "cmake"
     build = [cmake, "--build", "--preset", PRESET]
     steps: list[tuple[str, list[str]]] = [
@@ -123,26 +130,26 @@ def cmd_build(args: argparse.Namespace) -> int:
         if (rc := run_step(name, cmd, env)) != 0:
             return rc
 
-    if extraction_complete(GAME_DATA) and not args.force:
-        print(f"\n=== extract === skipped: game_data is complete ({EXTRACT_MARKER} present; use --force)")
+    if extraction_complete(game_data) and not args.force:
+        print(f"\n=== extract === skipped: {game_data.name} is complete ({EXTRACT_MARKER} present; use --force)")
     else:
-        if (rc := run_step("extract", [str(EXTRACT_EXE), str(iso), str(GAME_DATA)], env)) != 0:
+        if (rc := run_step("extract", [str(EXTRACT_EXE), str(iso), str(game_data)], env)) != 0:
             return rc
 
     steps = [
-        ("recompile", build + ["--target", "recompile"]),
-        # gow2 only exists if build/generated is there at configure time: reconfigure
+        ("recompile", build + ["--target", recompile_target]),
+        # the game exe only exists if its generated code is there at configure time: reconfigure
         ("reconfigure", [cmake, "--preset", PRESET]),
-        ("build gow2", build + ["--target", "gow2"]),
+        (f"build {exe_target}", build + ["--target", exe_target]),
     ]
     for name, cmd in steps:
         if (rc := run_step(name, cmd, env)) != 0:
             return rc
 
-    if not GOW2_EXE.is_file():
-        print(f"error: gow2.exe not found after the build: {GOW2_EXE}", file=sys.stderr)
+    if not exe.is_file():
+        print(f"error: {exe.name} not found after the build: {exe}", file=sys.stderr)
         return 1
-    print(f"\nDone. Executable: {GOW2_EXE}\n{RUN_HINT}")
+    print(f"\nDone. Executable: {exe}\n{RUN_HINT.replace(str(GOW2_EXE), str(exe))}")
     return 0
 
 
@@ -160,9 +167,10 @@ def cmd_shell(args: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="gow2.py", description="Gears of War 2 PC build pipeline")
     sub = parser.add_subparsers(dest="command", required=True)
-    b = sub.add_parser("build", help="extract -> configure -> recompile -> build gow2.exe")
-    b.add_argument("--iso", required=True, help="path to the Gears of War 2 disc (ISO)")
-    b.add_argument("--force", action="store_true", help="repeat the extraction even if game_data is complete")
+    b = sub.add_parser("build", help="extract -> configure -> recompile -> build the game exe")
+    b.add_argument("--game", choices=sorted(GAMES), default="gow2", help="game to build (default: gow2)")
+    b.add_argument("--iso", required=True, help="path to the game disc (ISO)")
+    b.add_argument("--force", action="store_true", help="repeat the extraction even if the game data is complete")
     b.set_defaults(func=cmd_build)
     sh = sub.add_parser("shell", help="run a command (default: cmd.exe) with the same MSVC environment as build")
     sh.add_argument("command_line", nargs=argparse.REMAINDER, help="command to run, e.g. cmake --preset clang-release")

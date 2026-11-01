@@ -1,0 +1,117 @@
+diff --git a/src/xenia/gpu/command_processor.cc b/src/xenia/gpu/command_processor.cc
+index 77f20ca..c21a99c 100644
+--- a/src/xenia/gpu/command_processor.cc
++++ b/src/xenia/gpu/command_processor.cc
+@@ -130,6 +130,11 @@ DEFINE_bool(
+ namespace xe {
+ namespace gpu {
+ 
++// gow2: ZPD observer (set by the runtime).
++static std::atomic<ZPDObserverHook> zpd_observer_hook{nullptr};
++
++void SetZPDObserverHook(ZPDObserverHook hook) { zpd_observer_hook.store(hook); }
++
+ // This should be written completely differently with support for different
+ // types.
+ void SaveGPUSetting(GPUSetting setting, uint64_t value) {
+@@ -1104,6 +1109,10 @@ void CommandProcessor::QueueZPDReport(uint32_t report_address) {
+   }
+   zpd_awaited_report_count_ += report.awaited;
+   zpd_reports_.push_back(report);
++  // gow2: the shader capture sees the report in command order.
++  if (ZPDObserverHook hook = zpd_observer_hook.load()) {
++    hook(false, report.handle, report_address, 0, 0);
++  }
+ 
+   // The next report's segment opens at its first draw.
+   // Report runs without draws between them never use any pool slots.
+@@ -1355,6 +1364,11 @@ void CommandProcessor::PumpPendingRetire() {
+     zpd_pending_retire_start_ms_ = 0;
+ 
+     zpd_sample_counter_ += front.delta;
++    // gow2: the shader capture sees the report's samples.
++    if (ZPDObserverHook hook = zpd_observer_hook.load()) {
++      hook(true, front.handle, front.address, front.delta.z_pass,
++           front.delta.z_fail);
++    }
+     if (front.speculative) {
+       if (fast_zpd_report_cached_deltas_.size() >= kFastZPDCacheMaxEntries &&
+           !fast_zpd_report_cached_deltas_.count(front.address)) {
+diff --git a/src/xenia/gpu/command_processor.h b/src/xenia/gpu/command_processor.h
+index 4d90dc8..3a21256 100644
+--- a/src/xenia/gpu/command_processor.h
++++ b/src/xenia/gpu/command_processor.h
+@@ -38,6 +38,14 @@ namespace gpu {
+ 
+ enum class GPUSetting { ClearMemoryPageState, ReadbackMemexport };
+ 
++// gow2: ZPD observer (the runtime's shader capture), on the command processor
++// thread: retired false = EVENT_WRITE_ZPD queued, in command order; true = the
++// report's sample delta (guest samples), written to the guest. nullptr = no hook.
++using ZPDObserverHook = void (*)(bool retired, uint64_t handle,
++                                 uint32_t address, uint64_t z_pass,
++                                 uint64_t z_fail);
++void SetZPDObserverHook(ZPDObserverHook hook);
++
+ enum class ReadbackResolveMode {
+   kDisabled,  // No readback (none)
+   kFast,      // Delayed sync, 1 frame behind (fast)
+diff --git a/src/xenia/gpu/d3d12/d3d12_command_processor.cc b/src/xenia/gpu/d3d12/d3d12_command_processor.cc
+index 39af011..b96796c 100644
+--- a/src/xenia/gpu/d3d12/d3d12_command_processor.cc
++++ b/src/xenia/gpu/d3d12/d3d12_command_processor.cc
+@@ -69,6 +69,13 @@ namespace xe {
+ namespace gpu {
+ namespace d3d12 {
+ 
++// gow2: draw observer (set by the runtime).
++static std::atomic<DrawObserverHook> draw_observer_hook{nullptr};
++
++void SetDrawObserverHook(DrawObserverHook hook) {
++  draw_observer_hook.store(hook);
++}
++
+ // Generated with `xb buildshaders`.
+ namespace shaders {
+ #include "xenia/gpu/shaders/bytecode/d3d12_5_1/apply_gamma_pwl_cs.h"
+@@ -3058,12 +3065,20 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
+           vertex_shader->ucode_data_hash(), vertex_shader_modification.value,
+           pixel_shader ? pixel_shader->ucode_data_hash() : 0,
+           pixel_shader_modification.value);
++      // gow2: the shader capture sees the skipped draw.
++      if (DrawObserverHook hook = draw_observer_hook.load()) {
++        hook(*vertex_shader_translation, pixel_shader_translation, true);
++      }
+       OnVIZSurveyDraw(false);
+       return true;
+     }
+     // Re-fetch root signature now that pipeline is ready.
+     root_signature = pipeline_cache_->GetRootSignatureByHandle(pipeline_handle);
+   }
++  // gow2: the shader capture sees the issued draw.
++  if (DrawObserverHook hook = draw_observer_hook.load()) {
++    hook(*vertex_shader_translation, pixel_shader_translation, false);
++  }
+ 
+   // Update the textures - this may bind pipelines.
+   uint32_t used_texture_mask =
+diff --git a/src/xenia/gpu/d3d12/d3d12_command_processor.h b/src/xenia/gpu/d3d12/d3d12_command_processor.h
+index 911235f..ac92241 100644
+--- a/src/xenia/gpu/d3d12/d3d12_command_processor.h
++++ b/src/xenia/gpu/d3d12/d3d12_command_processor.h
+@@ -57,6 +57,15 @@ struct MemExportRange {
+   uint32_t base_address_dwords;
+   uint32_t size_dwords;
+ };
++// gow2: called on the command processor thread for every draw that reaches
++// pipeline configuration, with the translations it uses; skipped = the draw
++// was not issued (pipeline not ready with async compilation). ps null: no
++// pixel shader. nullptr = no hook (the runtime's shader capture).
++using DrawObserverHook = void (*)(D3D12Shader::D3D12Translation& vs,
++                                  D3D12Shader::D3D12Translation* ps,
++                                  bool skipped);
++void SetDrawObserverHook(DrawObserverHook hook);
++
+ // gow2: not final: runtime/gpu/d3d12_backend.cpp derives from it the command
+ // processor that presents on each swap, counts resolves (IssueSwap/IssueCopy).
+ class D3D12CommandProcessor : public CommandProcessor {

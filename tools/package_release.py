@@ -10,10 +10,10 @@ import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-BUILD_FILES = ["gow2.exe", "gow2_dlss.dll", "amd_fidelityfx_loader_dx12.dll", "amd_fidelityfx_upscaler_dx12.dll",
-               "amd_fidelityfx_framegeneration_dx12.dll"]
+BUILD_FILES = ["gears.exe", "gow2.exe", "gow3.exe", "gow2_dlss.dll", "amd_fidelityfx_loader_dx12.dll",
+               "amd_fidelityfx_upscaler_dx12.dll", "amd_fidelityfx_framegeneration_dx12.dll"]
 ROOT_FILES = ["LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md", "README.md"]
-# No gow2.toml: config/gow2.toml is the XenonRecomp config (gow2.exe rejects it); the launcher writes the settings file.
+# No gow2.toml/gow3.toml: games/<id>/<id>.toml is the XenonRecomp config (the exe rejects it); the launcher writes the settings file.
 TOP = "gow2-recomp/"
 
 

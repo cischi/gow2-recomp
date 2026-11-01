@@ -1,0 +1,78 @@
+diff --git a/src/xenia/gpu/d3d12/d3d12_command_processor.cc b/src/xenia/gpu/d3d12/d3d12_command_processor.cc
+index b96796c..69ebba8 100644
+--- a/src/xenia/gpu/d3d12/d3d12_command_processor.cc
++++ b/src/xenia/gpu/d3d12/d3d12_command_processor.cc
+@@ -3128,25 +3128,23 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
+   // positions (patch 0009).
+   gviargs.msaa_2x_sample_0_to_console =
+       host_render_targets_used && !xenos_sample_positions_used_;
+-  // gow2: upscaler jitter on draws with a depth test on the scene
+-  // surfaces (2x MSAA geometry and 1x lights with the same pitch, which
+-  // test the geometry's depth), not on depth restores from a texture
+-  // (pixel shader writing depth with an ALWAYS test: the texture already
+-  // holds the shifted geometry) nor on shadow maps and surfaces of
+-  // another size; the serial number in padding_set_to_0 invalidates the
+-  // cached viewport when the jitter changes (patch 0013).
+-  // gow2: the same predicate selects the LOD bias draws (patch 0014).
+-  gow2_scene_draw_ =
+-      normalized_depth_control.z_enable &&
+-      regs.Get<reg::RB_SURFACE_INFO>().surface_pitch == gow2_jitter_pitch_ &&
+-      // gow2: the remapped Clear (patch 0017) stays without jitter, as at 4x.
+-      !gow2_clear_remap.applied() &&
+-      !(pixel_shader && pixel_shader->writes_depth() &&
+-        normalized_depth_control.zfunc == xenos::CompareFunction::kAlways);
++  // gow2: upscaler jitter on the scene surfaces (2x MSAA geometry and 1x
++  // lights with the same pitch, which test the geometry's depth) and half of
++  // it on the occlusion query boxes (draw_util::Gow2JitterScale); the serial
++  // number in padding_set_to_0 invalidates the cached viewport when the
++  // jitter changes (patch 0013).
++  // gow2: the scene draws (scale 1) are also the LOD bias draws (patch 0014).
++  const float gow2_jitter_scale = draw_util::Gow2JitterScale(
++      normalized_depth_control.z_enable, normalized_depth_control.z_write_enable,
++      normalized_depth_control.zfunc,
++      pixel_shader && pixel_shader->writes_depth(),
++      regs.Get<reg::RB_SURFACE_INFO>().surface_pitch, gow2_jitter_pitch_,
++      regs[XE_GPU_REG_RB_COLOR_MASK], gow2_clear_remap.applied());
++  gow2_scene_draw_ = gow2_jitter_scale == 1.0f;
+   if ((gow2_jitter_xy_[0] != 0.0f || gow2_jitter_xy_[1] != 0.0f) &&
+-      gow2_scene_draw_) {
+-    gviargs.gow2_jitter_xy[0] = gow2_jitter_xy_[0];
+-    gviargs.gow2_jitter_xy[1] = gow2_jitter_xy_[1];
++      gow2_jitter_scale != 0.0f) {
++    gviargs.gow2_jitter_xy[0] = gow2_jitter_xy_[0] * gow2_jitter_scale;
++    gviargs.gow2_jitter_xy[1] = gow2_jitter_xy_[1] * gow2_jitter_scale;
+     gviargs.padding_set_to_0 = gow2_jitter_serial_;
+   }
+ 
+diff --git a/src/xenia/gpu/draw_util.h b/src/xenia/gpu/draw_util.h
+index 1d8a364..25eba11 100644
+--- a/src/xenia/gpu/draw_util.h
++++ b/src/xenia/gpu/draw_util.h
+@@ -500,6 +500,27 @@ struct GetViewportInfoArgs {
+   }
+ };
+ 
++// gow2: fraction of the upscaler jitter (guest px of the scene) a draw gets, in
++// its own pixels (patch 0013). 1: draws with a depth test on the scene surfaces
++// (pitch scene_pitch), except depth restores from a texture (pixel shader
++// writing depth with an ALWAYS test: the texture already holds the shifted
++// geometry) and the remapped Clear (patch 0017). 0.5: occlusion query boxes
++// (depth test, no depth or color writes) on the half-resolution surface, so
++// they stay on the jittered geometry the query depth was built from (GoW3:
++// otherwise distant floors fail against themselves and flash). 0: the rest.
++inline float Gow2JitterScale(bool z_enable, bool z_write,
++                             xenos::CompareFunction zfunc, bool ps_writes_depth,
++                             uint32_t surface_pitch, uint32_t scene_pitch,
++                             uint32_t color_mask, bool clear_remapped) {
++  if (!z_enable || clear_remapped ||
++      (ps_writes_depth && zfunc == xenos::CompareFunction::kAlways)) {
++    return 0.0f;
++  }
++  if (surface_pitch == scene_pitch) return 1.0f;
++  if (surface_pitch * 2 == scene_pitch && !z_write && !color_mask) return 0.5f;
++  return 0.0f;
++}
++
+ // Converts the guest viewport (or fakes one if drawing without a viewport) to
+ // a viewport, plus values to multiply-add the returned position by, usable on
+ // host graphics APIs such as Direct3D 11+ and Vulkan, also forcing it to the

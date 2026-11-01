@@ -42,18 +42,26 @@ namespace gpu {
 class Overlay {
  public:
   using ApplyFn = std::function<void(const settings::Settings&)>;
-  // null window: no hook (the panel never opens).
+  using ScreenshotFn = std::function<void()>;
+  using ToggleFn = std::function<void()>;
+  // null window: no hook (the panel never opens). on_screenshot: called on the window thread at every F12
+  // press (empty: F12 goes to the game). on_shader_capture: the same for F11 (--shader-capture only).
   static std::unique_ptr<Overlay> Create(plat::Window* window, std::filesystem::path config,
-                                         settings::Settings running, ApplyFn on_apply);
+                                         settings::Settings running, ApplyFn on_apply,
+                                         ScreenshotFn on_screenshot = {}, ToggleFn on_shader_capture = {});
   // Removes the hook, then destroys backend and context (GPU already stopped: the presenter guarantees it).
   ~Overlay();
 
   bool IsOpen() const { return open_.load(); }
+  // Shader capture running: "REC shader" in the top-left corner, also with the panel closed. Any thread.
+  void SetRecording(bool on) { recording_.store(on); }
+  // Draw has something to draw: the panel or the recording indicator.
+  bool Visible() const { return open_.load() || recording_.load(); }
   // Panel state and open combo (tests; Draw thread).
   const launcher::LauncherState& State() const { return state_; }
   bool PopupOpen() const;
   // Inside Present: back buffer w x h in RENDER_TARGET behind rtv, format kGuestOutputFormat.
-  // With the panel closed it does nothing.
+  // With the panel closed it draws only the recording indicator (SetRecording), or nothing.
   void Draw(ID3D12Device* device, ID3D12CommandQueue* queue, ID3D12GraphicsCommandList* list,
             D3D12_CPU_DESCRIPTOR_HANDLE rtv, uint32_t w, uint32_t h);
 
@@ -70,6 +78,7 @@ class Overlay {
   bool Init(ID3D12Device* device, ID3D12CommandQueue* queue, std::string& why);
   void Apply();
   void Close();
+  void DrawRecordingIndicator();
 
   plat::Window* window_ = nullptr;
   void* hwnd_ = nullptr;
@@ -78,8 +87,11 @@ class Overlay {
   settings::Settings running_, current_;
   std::vector<launcher::Resolution> monitor_modes_;  // modes of the primary monitor, read in Init
   ApplyFn on_apply_;
+  ScreenshotFn on_screenshot_;
+  ToggleFn on_shader_capture_;
 
   std::atomic<bool> open_{false};
+  std::atomic<bool> recording_{false};
   std::atomic<uint32_t> opens_{0};  // openings with F1 (the hook empties the queue on every opening)
   std::atomic<bool> disabled_{false};
   std::mutex queue_mutex_;

@@ -90,6 +90,7 @@
 #include "gpu/frame_generation_state.h"
 #include "gpu/hdr_passes.h"
 #include "gpu/overlay.h"
+#include "gpu/png_writer.h"
 #include "gpu/upscale_frame_state.h"
 #include "gpu/upscale_passes.h"
 #include "gpu/upscaler.h"
@@ -199,12 +200,25 @@ class Presenter final : public xe::ui::d3d12::D3D12Presenter {
   // earlier or equal instant already queued) saves the screenshot to `file`.
   void ArmScreenshot(std::chrono::steady_clock::time_point at, std::filesystem::path file);
   uint64_t FramesPresented() const { return frames_presented_.load(); }
+  // Shader capture: the next Present copies its SDR image (the one F12 saves) into a free slot of a ring of
+  // kCaptureSlots readback buffers, with no GPU wait; when the slot's fence has completed (checked at every Present
+  // and in FlushCaptureShots) the pixels (0x00RRGGBB) and the size go into `job`, pushed to `queue`. No free slot:
+  // the shot is dropped and counted. A second call before the Present replaces the first (counted as dropped).
+  // Present thread.
+  void QueueCaptureShot(ImageJob job, ImageWriteQueue* queue);
+  // Waits for the slots in flight and pushes their jobs.
+  void FlushCaptureShots();
+  uint64_t CaptureShotsDropped() const { return capture_dropped_; }
 
   // Upscaler. factory is called at the first capture and when the output
   // exceeds the context's maximum (after WaitIdle); if it returns nullptr the upscaler is turned off forever.
   // sharpness: RCAS 0..1, < 0 off.
   void SetUpscaler(UpscalerFactory factory, float sharpness, UpscaleDebug debug);
   bool UpscalerActive() const { return bool(upscaler_factory_); }
+  // Present only after the GPU has finished the frame. For OptiScaler: its NR on the finished picture presents on
+  // its own queue and skips the frames still rendering at Present (NR flickering on and off in light scenes, never
+  // applied in heavy ones).
+  void SetWaitGpuBeforePresent(bool wait) { wait_gpu_before_present_ = wait; }
   // Proxy swap chain of frame generation created.
   bool FrameGenerationActive() const { return bool(frame_gen_); }
   // The command processor captures the frame (UpscaleCapture) for the upscaler or for frame generation.
@@ -319,6 +333,24 @@ class Presenter final : public xe::ui::d3d12::D3D12Presenter {
   // Ordered by instant (on ties, in arrival order).
   std::vector<std::pair<std::chrono::steady_clock::time_point, std::filesystem::path>> screenshots_;
 
+  // Shader capture shots (QueueCaptureShot); each slot keeps the footprint of the frame it copied.
+  struct CaptureSlot {
+    Microsoft::WRL::ComPtr<ID3D12Resource> buffer;
+    UINT64 size = 0;
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+    uint64_t fence = 0;  // 0: free
+    ImageJob job;
+    ImageWriteQueue* queue = nullptr;
+  };
+  static constexpr size_t kCaptureSlots = 3;
+  // Free slot with a buffer for the current back buffer, or nullptr.
+  CaptureSlot* AcquireCaptureSlot();
+  // Pushes the jobs of the slots whose copy has completed; wait: waits for all of them first.
+  void CollectCaptureShots(bool wait);
+  std::array<CaptureSlot, kCaptureSlots> capture_slots_;
+  std::optional<std::pair<ImageJob, ImageWriteQueue*>> pending_capture_;
+  uint64_t capture_dropped_ = 0;
+
   std::atomic<uint64_t> frames_presented_{0};
   uint64_t refresh_count_ = 0;
 
@@ -338,6 +370,12 @@ class Presenter final : public xe::ui::d3d12::D3D12Presenter {
   uint32_t jitter_index_ = 0, jitter_render_w_ = 0, jitter_output_w_ = 0;
   std::chrono::steady_clock::time_point last_upscale_;
   bool upscaled_last_ = false;  // the last Present drew the upscaler output
+  bool wait_gpu_before_present_ = false;
+  uint64_t upscale_window_[2] = {};  // frames upscaled, presented since upscale_window_start_
+  std::chrono::steady_clock::time_point upscale_window_start_;
+  uint64_t perf_frames_ = 0;  // [perf] window: frames presented, longest frame gap
+  std::chrono::steady_clock::duration perf_longest_{};
+  std::chrono::steady_clock::time_point perf_window_start_, perf_last_frame_;
 
   std::optional<VideoChange> pending_video_;
   void ApplyVideo(const VideoChange& change);

@@ -38,12 +38,12 @@ const std::string kIni =
     "[Upscalers]\nDx12Upscaler=auto\nEnabled=auto\n[FrameGen]\nEnabled=auto\nFGInput=auto\nFGOutput=auto\n"
     "[FSRFG]\nAllowAsync=auto\nEnabled=auto\n[MFGUnlock]\nXeFG=auto\nRTX40=auto\n[Menu]\nFGShortcutKey=auto\nEnabled=auto\n"
     "[DlssNr]\n; c\nEnabled=auto\nRunBeforeSR=auto\nPreset=auto\nReversibleMode=auto\nWorkingScale=auto\n"
-    "SkinStructure=auto\nLocalTone=auto\nToggleKey=auto\n[HDR]\nEnabled=auto\nPreset=auto\nToggleKey=auto\n";
+    "SkinStructure=auto\nLocalTone=auto\nToggleKey=auto\nFinishedPicture=auto\n[HDR]\nEnabled=auto\nPreset=auto\nToggleKey=auto\n";
 const std::string kPatchedIni =
     "[Upscalers]\nDx12Upscaler=dlss\nEnabled=auto\n[FrameGen]\nEnabled=true\nFGInput=upscaler\nFGOutput=dlssg\n"
     "[FSRFG]\nAllowAsync=true\nEnabled=auto\n[MFGUnlock]\nXeFG=auto\nRTX40=detect\n[Menu]\nFGShortcutKey=0x76\nEnabled=auto\n"
     "[DlssNr]\n; c\nEnabled=true\nRunBeforeSR=true\nPreset=2\nReversibleMode=7\nWorkingScale=0.75\n"
-    "SkinStructure=0.75\nLocalTone=0.0\nToggleKey=0x75\n[HDR]\nEnabled=auto\nPreset=auto\nToggleKey=auto\n";
+    "SkinStructure=0.75\nLocalTone=0.0\nToggleKey=0x75\nFinishedPicture=true\n[HDR]\nEnabled=auto\nPreset=auto\nToggleKey=auto\n";
 
 // Zip like the fork's (in miniature), created with Windows' tar.exe in dir/pkg.zip.
 fs::path MakeZip(const fs::path& dir) {
@@ -117,11 +117,13 @@ TEST_CASE("patch_ini_keeps_crlf_and_spaced_keys", "[optiscaler]") {
   const std::string ini = "[Upscalers]\r\nDx12Upscaler = auto\r\n[FrameGen]\r\nEnabled = auto\r\nFGInput = auto\r\n"
                           "FGOutput = auto\r\n[FSRFG]\r\nAllowAsync = auto\r\n[MFGUnlock]\r\nRTX40 = auto\r\n[Menu]\r\nFGShortcutKey = auto\r\n"
                           "[DlssNr]\r\nEnabled = auto\r\nRunBeforeSR = auto\r\nPreset = auto\r\nReversibleMode = auto\r\n"
-                          "WorkingScale = auto\r\nSkinStructure = auto\r\nLocalTone = auto\r\nToggleKey = auto\r\n";
+                          "WorkingScale = auto\r\nSkinStructure = auto\r\nLocalTone = auto\r\nToggleKey = auto\r\n"
+                          "FinishedPicture = auto\r\n";
   const std::string out = optiscaler::PatchIni(ini);
   REQUIRE_FALSE(out.empty());
   CHECK_THAT(out, Catch::Matchers::ContainsSubstring("Dx12Upscaler = dlss\r\n"));
   CHECK_THAT(out, Catch::Matchers::ContainsSubstring("ToggleKey = 0x75\r\n"));
+  CHECK_THAT(out, Catch::Matchers::ContainsSubstring("FinishedPicture = true\r\n"));
   CHECK_THAT(out, Catch::Matchers::ContainsSubstring("[FSRFG]\r\nAllowAsync = true\r\n"));
 }
 
@@ -130,8 +132,19 @@ TEST_CASE("patch_ini_with_missing_key_is_empty", "[optiscaler]") {
   CHECK(optiscaler::PatchIni("[HDR]\nEnabled=auto\n").empty());
   // A key exists only in another section: [HDR]'s ToggleKey does not count for [DlssNr].
   std::string ini = kIni;
-  ini.erase(ini.find("ToggleKey=auto\n[HDR]"), std::string("ToggleKey=auto\n").size());
+  ini.erase(ini.find("ToggleKey=auto\nFinishedPicture"), std::string("ToggleKey=auto\n").size());
   CHECK(optiscaler::PatchIni(ini).empty());
+}
+
+TEST_CASE("nr_enabled_unless_explicitly_false", "[optiscaler]") {
+  CHECK_FALSE(optiscaler::NrEnabled("[DlssNr]\nToggleKey = 0x75\nEnabled = false\nRunBeforeSR = true\n"));
+  CHECK_FALSE(optiscaler::NrEnabled("[DlssNr]\r\nEnabled=false\r\n"));
+  CHECK(optiscaler::NrEnabled("[DlssNr]\nEnabled = true\n"));
+  CHECK(optiscaler::NrEnabled("[DlssNr]\nEnabled = auto\n"));
+  CHECK(optiscaler::NrEnabled(""));
+  // Another section's Enabled does not count.
+  CHECK(optiscaler::NrEnabled("[FrameGen]\nEnabled = false\n[DlssNr]\nEnabled = true\n"));
+  CHECK(optiscaler::NrEnabled("[DlssNr]\nEnabled = true\n[FrameGen]\nEnabled = false\n"));
 }
 
 TEST_CASE("install_removes_stale_temp_dirs", "[optiscaler]") {

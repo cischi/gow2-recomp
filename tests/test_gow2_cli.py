@@ -27,6 +27,23 @@ def test_missing_iso_fails_with_path(tmp_path):
     assert str(iso) in proc.stderr
 
 
+def test_build_rejects_unknown_game(tmp_path):
+    proc = _run("build", "--game", "gow4", "--iso", str(tmp_path / "DVD.iso"))
+    assert proc.returncode == 2
+
+
+def test_build_gow3_missing_iso(tmp_path):
+    proc = _run("build", "--game", "gow3", "--iso", str(tmp_path / "missing.iso"))
+    assert proc.returncode == 1
+    assert "error: ISO not found" in proc.stderr
+
+
+def test_build_help_lists_game():
+    proc = _run("build", "--help")
+    assert proc.returncode == 0
+    assert "--game" in proc.stdout
+
+
 def test_build_requires_iso():
     proc = _run("build")
     assert proc.returncode != 0
